@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="520" viewBox="0 0 720 520" role="img" aria-label="!=8<>: :018=5B0 =0 2K<KH;5==KE 40==KE">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f3f1ec"/>
+      <stop offset="100%" stop-color="#e7e2d8"/>
+    </linearGradient>
+  </defs>
+  <rect width="720" height="520" fill="url(#bg)"/>
+  <rect x="40" y="36" width="640" height="448" rx="18" fill="#fffcf7" stroke="#cfc7ba"/>
+  <text x="64" y="78" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="700" fill="#1c2430">54204@0B</text>
+  <text x="64" y="118" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="600" fill="#1c2430">>8 70?8A8</text>
+  <rect x="64" y="140" width="592" height="120" rx="12" fill="#ffffff" stroke="#cfc7ba"/>
+  <text x="84" y="178" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="600" fill="#1c2430">2099-06-26 19:30</text>
+  <text x="84" y="208" font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#1c2430">5B@>2 QB@ 5B@>28G</text>
+  <text x="84" y="234" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#5b6573">>=AC;LB0F8O B5@0?52B0 · $8;80; "5AB>2K9</text>
+  <rect x="420" y="164" width="120" height="28" rx="14" fill="#e8f2ef"/>
+  <text x="436" y="183" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#0f5c4c">K 70?8A0=K</text>
+  <text x="64" y="300" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#5b6573">K<KH;5==K5 40==K5: +7 900 000-00-00, 20=>2 20= 20=>28G</text>
+  <text x="64" y="330" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#5b6573">8;>B 2=CB@8 A5B8 :;8=8:8 · B>;L:> GB5=85</text>
+</svg>
