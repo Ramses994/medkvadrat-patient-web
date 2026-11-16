@@ -1,0 +1,24 @@
+# Secrets and local env
+.env
+.env.local
+.env.*.local
+
+# Dependencies and build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Test artefacts
+test-results/
+playwright-report/
+playwright/.cache/
+live-shots/
+coverage/
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+npm-debug.log*
