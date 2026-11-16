@@ -12,10 +12,16 @@ import {
   combineSignals,
   getAbortSignal,
   getGeneration,
+  getServerSession,
   isCurrentGeneration,
+  isSessionChangedError,
   isStaleSessionError,
+  REFRESH_RACE_RETRY_MS,
+  SessionChangedError,
+  setServerSession,
   StaleSessionError,
   waitForLogoutSettled,
+  withRefreshLock,
 } from '../session/sessionGate';
 
 export class ApiError extends Error {
@@ -37,13 +43,16 @@ type RefreshFn = () => Promise<boolean>;
 let refreshFn: RefreshFn | null = null;
 let refreshInFlight: Promise<boolean> | null = null;
 let onSessionLost: (() => void) | null = null;
+let onSessionChanged: (() => void) | null = null;
 
 export function configureSessionHooks(hooks: {
   refresh: RefreshFn;
   onSessionLost: () => void;
+  onSessionChanged?: () => void;
 }): void {
   refreshFn = hooks.refresh;
   onSessionLost = hooks.onSessionLost;
+  onSessionChanged = hooks.onSessionChanged ?? null;
 }
 
 /** Drop a shared refresh so a new session never waits on a stale one. */
@@ -57,11 +66,11 @@ async function sharedRefresh(): Promise<boolean> {
     const gen = getGeneration();
     refreshInFlight = (async () => {
       try {
-        const ok = await refreshFn();
+        const ok = await withRefreshLock(() => refreshFn!());
         if (!isCurrentGeneration(gen)) return false;
         return ok;
       } catch (e) {
-        if (isStaleSessionError(e)) return false;
+        if (isStaleSessionError(e) || isSessionChangedError(e)) return false;
         return false;
       }
     })().finally(() => {
@@ -94,8 +103,16 @@ function raise(env: ApiEnvelope<unknown>, status: number): never {
 
 function loseSession(): never {
   clearAccessToken();
+  setServerSession(null);
   onSessionLost?.();
   throw new ApiError('UNAUTHORIZED', 401, false);
+}
+
+function sessionChanged(): never {
+  clearAccessToken();
+  setServerSession(null);
+  onSessionChanged?.();
+  throw new SessionChangedError();
 }
 
 type RequestOpts = {
@@ -107,6 +124,8 @@ type RequestOpts = {
   signal?: AbortSignal;
   /** Wait for an in-flight logout before sending (OTP request/verify). */
   afterLogout?: boolean;
+  /** Skip the shared AbortController (keepalive logout). */
+  ignoreSessionAbort?: boolean;
 };
 
 async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
@@ -115,7 +134,9 @@ async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
   }
 
   const gen = getGeneration();
-  const signal = combineSignals(getAbortSignal(), opts.signal);
+  const signal = opts.ignoreSessionAbort
+    ? opts.signal
+    : combineSignals(getAbortSignal(), opts.signal);
 
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -123,7 +144,6 @@ async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
   if (opts.body !== undefined) {
     headers['Content-Type'] = 'application/json';
   }
-  // Auth routes for the web cabinet always send the client marker.
   if (path.startsWith('/api/auth/')) {
     headers['X-LK-Client'] = 'web';
   }
@@ -140,6 +160,7 @@ async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       credentials: 'same-origin',
       signal,
+      keepalive: opts.ignoreSessionAbort === true,
     });
   } catch (e) {
     if (!isCurrentGeneration(gen) || (e instanceof DOMException && e.name === 'AbortError')) {
@@ -149,7 +170,7 @@ async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
     throw new ApiError('NETWORK', 0, true);
   }
 
-  if (!isCurrentGeneration(gen)) {
+  if (!opts.ignoreSessionAbort && !isCurrentGeneration(gen)) {
     resetSharedRefresh();
     throw new StaleSessionError();
   }
@@ -166,20 +187,28 @@ async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
       }
       loseSession();
     }
-    // Second 401 after a successful refresh ends the session (У3).
     loseSession();
   }
 
   if (res.status === 204) {
-    if (!isCurrentGeneration(gen)) throw new StaleSessionError();
+    if (!opts.ignoreSessionAbort && !isCurrentGeneration(gen)) throw new StaleSessionError();
     return undefined as T;
   }
 
   const env = await parseEnvelope<T>(res);
-  if (!isCurrentGeneration(gen)) {
+  if (!opts.ignoreSessionAbort && !isCurrentGeneration(gen)) {
     resetSharedRefresh();
     throw new StaleSessionError();
   }
+
+  if (res.status === 409) {
+    const code = env.error_details?.code || '';
+    if (code === 'SESSION_CHANGED') sessionChanged();
+    if (code === 'REFRESH_RACE') {
+      throw new ApiError('REFRESH_RACE', 409, true);
+    }
+  }
+
   if (!res.ok || env.success === false) {
     raise(env, res.status);
   }
@@ -213,28 +242,56 @@ export function selectPatient(requestId: string, patientId: number): Promise<Tok
   });
 }
 
-export async function refreshSession(): Promise<TokenPair> {
-  const gen = getGeneration();
+function applyTokens(data: TokenPair): void {
+  setAccessToken(data.access);
+  if (data.session) setServerSession(data.session);
+}
+
+async function refreshOnce(gen: number): Promise<TokenPair> {
+  const session = getServerSession();
+  const body: Record<string, string> = {};
+  if (session) body.session = session;
   const data = await request<TokenPair>('/api/auth/refresh', {
     method: 'POST',
-    body: {},
+    body,
     retryOn401: false,
   });
   if (!isCurrentGeneration(gen)) {
     resetSharedRefresh();
     throw new StaleSessionError();
   }
-  setAccessToken(data.access);
+  applyTokens(data);
   return data;
 }
 
-export function logoutSession(signal?: AbortSignal): Promise<void> {
-  return request('/api/auth/logout', {
+export async function refreshSession(): Promise<TokenPair> {
+  const gen = getGeneration();
+  try {
+    return await refreshOnce(gen);
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'REFRESH_RACE') {
+      await new Promise((r) => setTimeout(r, REFRESH_RACE_RETRY_MS));
+      if (!isCurrentGeneration(gen)) throw new StaleSessionError();
+      return refreshOnce(gen);
+    }
+    throw e;
+  }
+}
+
+/** Logout never uses the shared AbortController; keepalive + session in body. */
+export function logoutSession(): Promise<void> {
+  const session = getServerSession();
+  const body: Record<string, string> = {};
+  if (session) body.session = session;
+  const ac = new AbortController();
+  const timer = window.setTimeout(() => ac.abort(), 5_000);
+  return request<void>('/api/auth/logout', {
     method: 'POST',
-    body: {},
+    body,
     retryOn401: false,
-    signal,
-  });
+    signal: ac.signal,
+    ignoreSessionAbort: true,
+  }).finally(() => window.clearTimeout(timer));
 }
 
 export function getProfile(): Promise<Profile> {
@@ -257,8 +314,9 @@ export async function quietBootstrap(): Promise<boolean> {
     await refreshSession();
     return true;
   } catch (e) {
-    if (isStaleSessionError(e)) return false;
+    if (isStaleSessionError(e) || isSessionChangedError(e)) return false;
     clearAccessToken();
+    setServerSession(null);
     return false;
   }
 }

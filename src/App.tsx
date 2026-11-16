@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   configureSessionHooks,
   loadRuntimeConfig,
@@ -16,8 +16,13 @@ import { SelectProfileScreen } from './screens/SelectProfileScreen';
 import { startIdleWatch } from './session/idle';
 import {
   advanceSession,
-  LOGOUT_CHANNEL,
-  LOGOUT_TIMEOUT_MS,
+  broadcastTab,
+  ensureTabChannel,
+  getGeneration,
+  getServerSession,
+  isCurrentGeneration,
+  isSessionChangedError,
+  setServerSession,
   trackLogoutNetwork,
 } from './session/sessionGate';
 import { clearAccessToken, setAccessToken } from './session/tokenStore';
@@ -32,56 +37,43 @@ type Phase =
 export function App() {
   const [phase, setPhase] = useState<Phase>({ kind: 'boot' });
   const [clinicPhone, setClinicPhone] = useState('');
-  const skippingServerLogout = useRef(false);
 
   const showLogin = useCallback(() => {
     setPhase({ kind: 'login' });
   }, []);
 
-  /** У2: clear local session first; optionally skip the server logout (cross-tab). */
+  /** Local clear only — no server logout (cross-tab / SESSION_CHANGED). */
   const endLocalSession = useCallback(() => {
     advanceSession();
     resetSharedRefresh();
     clearAccessToken();
+    setServerSession(null);
     showLogin();
   }, [showLogin]);
 
-  const broadcastLogout = useCallback(() => {
-    try {
-      const ch = new BroadcastChannel(LOGOUT_CHANNEL);
-      ch.postMessage('logout');
-      ch.close();
-    } catch {
-      // BroadcastChannel unavailable — single-tab only.
-    }
-  }, []);
-
   const doLogout = useCallback(
     async (opts: { fromBroadcast?: boolean } = {}) => {
+      const session = getServerSession() ?? undefined;
       endLocalSession();
-      if (opts.fromBroadcast || skippingServerLogout.current) return;
-      broadcastLogout();
-      const ac = new AbortController();
-      const timer = window.setTimeout(() => ac.abort(), LOGOUT_TIMEOUT_MS);
-      await trackLogoutNetwork(async () => {
-        try {
-          await logoutSession(ac.signal);
-        } catch {
-          // Late or failed logout is discarded (У1 / У2).
-        } finally {
-          window.clearTimeout(timer);
-        }
-      });
+      if (opts.fromBroadcast) return;
+      broadcastTab({ type: 'logout', session });
+      // Keepalive logout outside shared AbortController; never cancelled by local clear.
+      await trackLogoutNetwork(() => logoutSession());
     },
-    [broadcastLogout, endLocalSession],
+    [endLocalSession],
   );
 
-  const enterCabinet = useCallback((access: string) => {
-    advanceSession();
-    resetSharedRefresh();
-    setAccessToken(access);
-    setPhase({ kind: 'cabinet', tab: 'appointments' });
-  }, []);
+  const enterCabinet = useCallback(
+    (access: string, session?: string) => {
+      advanceSession();
+      resetSharedRefresh();
+      setAccessToken(access);
+      if (session) setServerSession(session);
+      broadcastTab({ type: 'login', session: session ?? getServerSession() ?? undefined });
+      setPhase({ kind: 'cabinet', tab: 'appointments' });
+    },
+    [],
+  );
 
   useEffect(() => {
     configureSessionHooks({
@@ -89,48 +81,49 @@ export function App() {
         try {
           await refreshSession();
           return true;
-        } catch {
+        } catch (e) {
+          if (isSessionChangedError(e)) return false;
           return false;
         }
       },
       onSessionLost: () => {
-        // У2 for session loss: clear UI, then best-effort server logout.
         void doLogout();
       },
+      onSessionChanged: () => {
+        // 409 SESSION_CHANGED → clear and login; do NOT send logout.
+        endLocalSession();
+      },
     });
-  }, [doLogout]);
+  }, [doLogout, endLocalSession]);
 
   useEffect(() => {
-    let ch: BroadcastChannel;
-    try {
-      ch = new BroadcastChannel(LOGOUT_CHANNEL);
-    } catch {
-      return;
-    }
-    ch.onmessage = () => {
-      skippingServerLogout.current = true;
-      void doLogout({ fromBroadcast: true }).finally(() => {
-        skippingServerLogout.current = false;
-      });
-    };
-    return () => ch.close();
-  }, [doLogout]);
+    return ensureTabChannel((msg) => {
+      if (msg.type === 'logout') {
+        endLocalSession();
+        return;
+      }
+      if (msg.type === 'login') {
+        const mine = getServerSession();
+        if (msg.session && mine && msg.session === mine) return;
+        endLocalSession();
+      }
+    });
+  }, [endLocalSession]);
 
   useEffect(() => {
-    let cancelled = false;
+    const bootGen = getGeneration();
     (async () => {
       const cfg = await loadRuntimeConfig();
-      if (!cancelled) setClinicPhone(cfg.clinic_phone || '');
+      if (!isCurrentGeneration(bootGen)) return;
+      setClinicPhone(cfg.clinic_phone || '');
       const ok = await quietBootstrap();
-      if (cancelled) return;
+      if (!isCurrentGeneration(bootGen)) return;
       if (ok) {
-        advanceSession();
         setPhase({ kind: 'cabinet', tab: 'appointments' });
-      } else setPhase({ kind: 'login' });
+      } else {
+        setPhase({ kind: 'login' });
+      }
     })();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   useEffect(() => {
@@ -176,7 +169,7 @@ export function App() {
 
       {phase.kind === 'login' ? (
         <LoginScreen
-          onTokens={enterCabinet}
+          onTokens={(access, session) => enterCabinet(access, session)}
           onCandidates={(requestId, candidates) =>
             setPhase({ kind: 'select', requestId, candidates })
           }
@@ -187,7 +180,7 @@ export function App() {
         <SelectProfileScreen
           requestId={phase.requestId}
           candidates={phase.candidates}
-          onTokens={enterCabinet}
+          onTokens={(access, session) => enterCabinet(access, session)}
           onBack={showLogin}
         />
       ) : null}

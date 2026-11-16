@@ -6,7 +6,7 @@ import { ErrorBox } from '../ui/ErrorBox';
 import { formatPhoneMask, sanitizeCode, toApiPhone } from '../ui/phone';
 
 type Props = {
-  onTokens: (access: string) => void;
+  onTokens: (access: string, session?: string) => void;
   onCandidates: (requestId: string, candidates: PatientCandidate[]) => void;
 };
 
@@ -61,7 +61,7 @@ export function LoginScreen({ onTokens, onCandidates }: Props) {
         return;
       }
       if (res.access) {
-        onTokens(res.access);
+        onTokens(res.access, res.session);
         return;
       }
       setErr({ code: 'INTERNAL', status: 500 });

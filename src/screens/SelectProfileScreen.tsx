@@ -7,7 +7,7 @@ import { ErrorBox } from '../ui/ErrorBox';
 type Props = {
   requestId: string;
   candidates: PatientCandidate[];
-  onTokens: (access: string) => void;
+  onTokens: (access: string, session?: string) => void;
   onBack: () => void;
 };
 
@@ -20,7 +20,7 @@ export function SelectProfileScreen({ requestId, candidates, onTokens, onBack }:
     setBusy(true);
     try {
       const tok = await selectPatient(requestId, id);
-      onTokens(tok.access);
+      onTokens(tok.access, tok.session);
     } catch (e) {
       if (isStaleSessionError(e)) return;
       const ae = e instanceof ApiError ? e : new ApiError('NETWORK', 0, true);

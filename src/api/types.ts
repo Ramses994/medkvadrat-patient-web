@@ -20,6 +20,7 @@ export type PatientCandidate = {
 export type TokenPair = {
   access: string;
   access_expires_in: number;
+  session?: string;
   refresh?: string;
   refresh_expires_in?: number;
 };
