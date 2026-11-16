@@ -1,0 +1,206 @@
+:root {
+  color-scheme: light;
+  --bg: #f3f1ec;
+  --bg-deep: #e7e2d8;
+  --ink: #1c2430;
+  --muted: #5b6573;
+  --line: #cfc7ba;
+  --card: #fffcf7;
+  --accent: #0f5c4c;
+  --accent-ink: #ffffff;
+  --danger: #8a2f2f;
+  --warn: #7a5a12;
+  --radius: 14px;
+  --shadow: 0 10px 30px rgba(28, 36, 48, 0.08);
+  --font: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  color: var(--ink);
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #dfece7 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #efe6d4 0%, transparent 50%),
+    linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: var(--accent);
+}
+
+.app-shell {
+  width: min(720px, 100%);
+  margin: 0 auto;
+  padding: 16px 16px 40px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.brand {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.nav button,
+.btn {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 10px 14px;
+  min-height: 44px;
+}
+
+.nav button.active,
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.btn.ghost {
+  background: transparent;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.stack {
+  display: grid;
+  gap: 14px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.95rem;
+}
+
+input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #fff;
+  color: var(--ink);
+}
+
+.hint,
+.muted {
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.error {
+  color: var(--danger);
+  background: #f8ecec;
+  border: 1px solid #e5c7c7;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  background: #fff;
+  display: grid;
+  gap: 6px;
+}
+
+.card h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.badge {
+  display: inline-block;
+  width: fit-content;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #e8f2ef;
+  color: var(--accent);
+  font-size: 0.85rem;
+}
+
+.badge.warn {
+  background: #f4ecda;
+  color: var(--warn);
+}
+
+.empty {
+  text-align: center;
+  padding: 28px 12px;
+}
+
+.profile-choice {
+  text-align: left;
+  width: 100%;
+}
+
+.heading-flush {
+  margin: 0;
+}
+
+.stack-gap-sm {
+  margin-top: 10px;
+}
+
+.footer-logout {
+  margin-top: 24px;
+}
+
+@media (min-width: 720px) {
+  .app-shell {
+    padding-top: 28px;
+  }
+
+  .brand {
+    font-size: 1.6rem;
+  }
+}
