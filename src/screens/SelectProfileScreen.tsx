@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { ApiError, selectPatient } from '../api/client';
-import type { PatientCandidate } from '../api/types';
+import type { PatientCandidate, TokenPair } from '../api/types';
 import { isStaleSessionError } from '../session/sessionGate';
 import { ErrorBox } from '../ui/ErrorBox';
 
 type Props = {
   requestId: string;
   candidates: PatientCandidate[];
-  onTokens: (access: string, session?: string) => void;
+  onTokens: (tokens: TokenPair) => void;
   onBack: () => void;
 };
 
@@ -20,7 +20,7 @@ export function SelectProfileScreen({ requestId, candidates, onTokens, onBack }:
     setBusy(true);
     try {
       const tok = await selectPatient(requestId, id);
-      onTokens(tok.access, tok.session);
+      onTokens(tok);
     } catch (e) {
       if (isStaleSessionError(e)) return;
       const ae = e instanceof ApiError ? e : new ApiError('NETWORK', 0, true);

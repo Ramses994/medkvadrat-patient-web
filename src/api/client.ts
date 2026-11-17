@@ -9,19 +9,22 @@ import type {
 } from './types';
 import { clearAccessToken, getAccessToken, setAccessToken } from '../session/tokenStore';
 import {
+  ACCESS_REFRESH_SKEW_MS,
+  clearLogoutFlag,
   combineSignals,
   getAbortSignal,
   getGeneration,
   getServerSession,
+  hasLogoutFlag,
   isCurrentGeneration,
   isSessionChangedError,
   isStaleSessionError,
+  nowMs,
   REFRESH_RACE_RETRY_MS,
   SessionChangedError,
   setServerSession,
   StaleSessionError,
   waitForLogoutSettled,
-  withRefreshLock,
 } from '../session/sessionGate';
 
 export class ApiError extends Error {
@@ -44,20 +47,46 @@ let refreshFn: RefreshFn | null = null;
 let refreshInFlight: Promise<boolean> | null = null;
 let onSessionLost: (() => void) | null = null;
 let onSessionChanged: (() => void) | null = null;
+let accessExpiresAtMs = 0;
+let accessRefreshTimer = 0;
+let onAccessRefreshDue: (() => void) | null = null;
 
 export function configureSessionHooks(hooks: {
   refresh: RefreshFn;
   onSessionLost: () => void;
   onSessionChanged?: () => void;
+  onAccessRefreshDue?: () => void;
 }): void {
   refreshFn = hooks.refresh;
   onSessionLost = hooks.onSessionLost;
   onSessionChanged = hooks.onSessionChanged ?? null;
+  onAccessRefreshDue = hooks.onAccessRefreshDue ?? null;
 }
 
-/** Drop a shared refresh so a new session never waits on a stale one. */
 export function resetSharedRefresh(): void {
   refreshInFlight = null;
+}
+
+export function getAccessExpiresAtMs(): number {
+  return accessExpiresAtMs;
+}
+
+export function clearAccessSchedule(): void {
+  accessExpiresAtMs = 0;
+  if (accessRefreshTimer) {
+    window.clearTimeout(accessRefreshTimer);
+    accessRefreshTimer = 0;
+  }
+}
+
+function scheduleAccessRefresh(expiresInSec: number): void {
+  clearAccessSchedule();
+  const issued = nowMs();
+  accessExpiresAtMs = issued + Math.max(0, expiresInSec) * 1000;
+  const delay = Math.max(0, accessExpiresAtMs - issued - ACCESS_REFRESH_SKEW_MS);
+  accessRefreshTimer = window.setTimeout(() => {
+    onAccessRefreshDue?.();
+  }, delay);
 }
 
 async function sharedRefresh(): Promise<boolean> {
@@ -66,7 +95,7 @@ async function sharedRefresh(): Promise<boolean> {
     const gen = getGeneration();
     refreshInFlight = (async () => {
       try {
-        const ok = await withRefreshLock(() => refreshFn!());
+        const ok = await refreshFn();
         if (!isCurrentGeneration(gen)) return false;
         return ok;
       } catch (e) {
@@ -80,7 +109,6 @@ async function sharedRefresh(): Promise<boolean> {
   return refreshInFlight;
 }
 
-/** Exposed for Vitest: parallel 401s wait on one refresh. */
 export function __testSharedRefreshState(): { inFlight: boolean } {
   return { inFlight: refreshInFlight !== null };
 }
@@ -104,6 +132,7 @@ function raise(env: ApiEnvelope<unknown>, status: number): never {
 function loseSession(): never {
   clearAccessToken();
   setServerSession(null);
+  clearAccessSchedule();
   onSessionLost?.();
   throw new ApiError('UNAUTHORIZED', 401, false);
 }
@@ -111,6 +140,7 @@ function loseSession(): never {
 function sessionChanged(): never {
   clearAccessToken();
   setServerSession(null);
+  clearAccessSchedule();
   onSessionChanged?.();
   throw new SessionChangedError();
 }
@@ -119,12 +149,9 @@ type RequestOpts = {
   method?: string;
   body?: unknown;
   auth?: boolean;
-  /** When true, a 401 triggers one shared refresh and one retry. */
   retryOn401?: boolean;
   signal?: AbortSignal;
-  /** Wait for an in-flight logout before sending (OTP request/verify). */
   afterLogout?: boolean;
-  /** Skip the shared AbortController (keepalive logout). */
   ignoreSessionAbort?: boolean;
 };
 
@@ -242,9 +269,12 @@ export function selectPatient(requestId: string, patientId: number): Promise<Tok
   });
 }
 
-function applyTokens(data: TokenPair): void {
+export function applyTokens(data: TokenPair): void {
   setAccessToken(data.access);
   if (data.session) setServerSession(data.session);
+  if (typeof data.access_expires_in === 'number') {
+    scheduleAccessRefresh(data.access_expires_in);
+  }
 }
 
 async function refreshOnce(gen: number): Promise<TokenPair> {
@@ -272,17 +302,28 @@ export async function refreshSession(): Promise<TokenPair> {
     if (e instanceof ApiError && e.code === 'REFRESH_RACE') {
       await new Promise((r) => setTimeout(r, REFRESH_RACE_RETRY_MS));
       if (!isCurrentGeneration(gen)) throw new StaleSessionError();
-      return refreshOnce(gen);
+      try {
+        return await refreshOnce(gen);
+      } catch (e2) {
+        if (e2 instanceof ApiError && e2.code === 'REFRESH_RACE') {
+          loseSession();
+        }
+        throw e2;
+      }
     }
     throw e;
   }
 }
 
-/** Logout never uses the shared AbortController; keepalive + session in body. */
-export function logoutSession(): Promise<void> {
-  const session = getServerSession();
+/**
+ * Logout with keepalive outside the shared AbortController.
+ * Pass session explicitly so it survives local clear (Ш4).
+ * Omit session for post-F5 logout-flag recovery (Ш2).
+ */
+export function logoutSession(session?: string | null): Promise<void> {
   const body: Record<string, string> = {};
-  if (session) body.session = session;
+  const sid = session === undefined ? getServerSession() : session;
+  if (sid) body.session = sid;
   const ac = new AbortController();
   const timer = window.setTimeout(() => ac.abort(), 5_000);
   return request<void>('/api/auth/logout', {
@@ -292,6 +333,21 @@ export function logoutSession(): Promise<void> {
     signal: ac.signal,
     ignoreSessionAbort: true,
   }).finally(() => window.clearTimeout(timer));
+}
+
+/** Logout after F5 with the logout flag: no session in body; clear flag unless NETWORK. */
+export async function logoutAfterFlag(): Promise<'ok' | 'network'> {
+  try {
+    await logoutSession(null);
+    clearLogoutFlag();
+    return 'ok';
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'NETWORK') {
+      return 'network';
+    }
+    clearLogoutFlag();
+    return 'ok';
+  }
 }
 
 export function getProfile(): Promise<Profile> {
@@ -308,8 +364,8 @@ export function getVisits(from: string, to: string): Promise<Appointment[]> {
   });
 }
 
-/** Quiet bootstrap refresh: returns false when there is no session cookie. */
 export async function quietBootstrap(): Promise<boolean> {
+  if (hasLogoutFlag()) return false;
   try {
     await refreshSession();
     return true;
@@ -317,6 +373,19 @@ export async function quietBootstrap(): Promise<boolean> {
     if (isStaleSessionError(e) || isSessionChangedError(e)) return false;
     clearAccessToken();
     setServerSession(null);
+    clearAccessSchedule();
+    return false;
+  }
+}
+
+/** If access already expired (sleep/return), refresh before showing data. */
+export async function ensureFreshAccess(): Promise<boolean> {
+  if (!getAccessToken()) return false;
+  if (accessExpiresAtMs && nowMs() < accessExpiresAtMs) return true;
+  try {
+    await refreshSession();
+    return true;
+  } catch {
     return false;
   }
 }

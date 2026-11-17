@@ -292,22 +292,6 @@ test('hanging logout clears patient data immediately and unlocks login after 5s'
   await expect(page.getByLabel('Код')).toBeVisible();
 });
 
-test('logout in one tab shows login in the other without reload', async ({ browser }) => {
-  const context = await browser.newContext();
-  const page1 = await context.newPage();
-  const page2 = await context.newPage();
-
-  await login(page1);
-  await expect(page1.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
-  await page2.goto('/');
-  await expect(page2.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
-
-  await page1.getByRole('button', { name: 'Выйти' }).first().click();
-  await expect(page1.getByRole('heading', { name: 'Вход' })).toBeVisible();
-  await expect(page2.getByRole('heading', { name: 'Вход' })).toBeVisible();
-  await context.close();
-});
-
 test('quiet refresh 401 shows login', async ({ page }) => {
   await page.route('**/api/auth/refresh', async (route) => {
     await route.fulfill({

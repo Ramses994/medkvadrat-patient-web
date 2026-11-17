@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 /**
  * Local / Playwright stub for patient-api (read-only cabinet).
- * Fictional data only: +7 900 000-00-00 / 00-01 / 00-02, example.test.
+ * Mirrors web session rules: sid survives refresh, REFRESH_RACE 10s, absolute+idle TTL.
  */
 import http from 'node:http';
 
 const PORT = Number(process.env.STUB_API_PORT || 8091);
+const RACE_MS = 10_000;
+const ABS_MS = 12 * 60 * 60 * 1000;
+const IDLE_MS = 20 * 60 * 1000;
 
 /** @type {Map<string, { phone: string, kind: 'A' | 'B' | 'multi' }>} */
 const otp = new Map();
-/** @type {Map<string, { access: string, sid: string, patient: 'A' | 'B' }>} */
+/** @type {Map<string, { access: string, sid: string, patient: 'A' | 'B', expiresAt: number, sessionExpiresAt: number, revokedAt: number | null }>} */
 const refreshByToken = new Map();
 /** @type {Map<string, 'A' | 'B'>} */
 const accessPatient = new Map();
@@ -24,7 +27,6 @@ const PROFILE_A = {
   email: 'ivan@example.test',
   birth_date: '1990-05-15',
 };
-
 const PROFILE_B = {
   patient_id: 900002,
   full_name: 'Иванова Мария Ивановна',
@@ -32,7 +34,6 @@ const PROFILE_B = {
   email: 'maria@example.test',
   birth_date: '1992-08-20',
 };
-
 const APPTS_A = [
   {
     planning_id: 800001,
@@ -46,7 +47,6 @@ const APPTS_A = [
     confirmation: 'confirmed',
   },
 ];
-
 const APPTS_B = [
   {
     planning_id: 800002,
@@ -60,7 +60,6 @@ const APPTS_B = [
     confirmation: 'confirmed',
   },
 ];
-
 const VISITS = [
   {
     planning_id: 800010,
@@ -76,26 +75,18 @@ const VISITS = [
 ];
 
 function json(res, status, body) {
-  const raw = JSON.stringify(body);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
   });
-  res.end(raw);
+  res.end(JSON.stringify(body));
 }
-
 function ok(res, data) {
   json(res, 200, { success: true, data });
 }
-
 function fail(res, status, code, message) {
-  json(res, status, {
-    success: false,
-    error: message,
-    error_details: { code, message },
-  });
+  json(res, status, { success: false, error: message, error_details: { code, message } });
 }
-
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -113,59 +104,66 @@ function readBody(req) {
   });
 }
 
-function issueTokens(res, web, patient) {
+function issueTokens(res, web, patient, sid, sessionExpiresAt) {
+  const now = Date.now();
+  const sexp = sessionExpiresAt ?? now + ABS_MS;
+  const idleEnd = Math.min(now + IDLE_MS, sexp);
+  const accessTTL = Math.max(1, Math.floor(Math.min(900, (sexp - now) / 1000)));
   const access = `access-${accessSeq++}-${patient}`;
   const refresh = `refresh-${refreshSeq++}`;
-  const sid = `sid-${sidSeq++}`;
-  refreshByToken.set(refresh, { access, sid, patient });
+  const session = sid || `sid-${sidSeq++}`;
+  refreshByToken.set(refresh, {
+    access,
+    sid: session,
+    patient,
+    expiresAt: idleEnd,
+    sessionExpiresAt: sexp,
+    revokedAt: null,
+  });
   accessPatient.set(access, patient);
   if (web) {
-    res.setHeader(
-      'Set-Cookie',
-      `lk_refresh=${refresh}; Path=/api/auth; HttpOnly; SameSite=Strict`,
-    );
-    return { access, access_expires_in: 900, session: sid };
+    res.setHeader('Set-Cookie', `lk_refresh=${refresh}; Path=/api/auth; HttpOnly; SameSite=Strict`);
+    return { access, access_expires_in: accessTTL, session };
   }
-  return { access, refresh, access_expires_in: 900, refresh_expires_in: 2592000 };
+  return { access, refresh, access_expires_in: accessTTL, refresh_expires_in: 2592000 };
 }
 
 function isWeb(req) {
   return String(req.headers['x-lk-client'] || '').toLowerCase() === 'web';
 }
-
 function cookieRefresh(req) {
-  const raw = req.headers.cookie || '';
-  const m = /(?:^|;\s*)lk_refresh=([^;]+)/.exec(raw);
+  const m = /(?:^|;\s*)lk_refresh=([^;]+)/.exec(req.headers.cookie || '');
   return m ? decodeURIComponent(m[1]) : '';
 }
-
 function bearer(req) {
   const h = req.headers.authorization || '';
   return h.startsWith('Bearer ') ? h.slice(7).trim() : '';
 }
-
 function phoneKind(phone) {
   const digits = phone.replace(/\D/g, '');
   if (digits.endsWith('00000001')) return 'multi';
   if (digits.endsWith('00000002')) return 'B';
   return 'A';
 }
-
 function revokeSid(sid) {
-  for (const [tok, meta] of [...refreshByToken.entries()]) {
-    if (meta.sid === sid) refreshByToken.delete(tok);
+  const now = Date.now();
+  for (const meta of refreshByToken.values()) {
+    if (meta.sid === sid && meta.revokedAt == null) meta.revokedAt = now;
   }
+}
+function sidHasLive(sid) {
+  for (const meta of refreshByToken.values()) {
+    if (meta.sid === sid && meta.revokedAt == null) return true;
+  }
+  return false;
 }
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
   const path = url.pathname;
   const method = req.method || 'GET';
-
   try {
-    if (method === 'GET' && path === '/api/health') {
-      return ok(res, { status: 'ok' });
-    }
+    if (method === 'GET' && path === '/api/health') return ok(res, { status: 'ok' });
 
     if (method === 'POST' && path === '/api/auth/otp/request') {
       const body = await readBody(req);
@@ -207,14 +205,10 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'POST' && path === '/api/auth/otp/select-patient') {
       const body = await readBody(req);
-      if (!otp.has(String(body.request_id || ''))) {
-        return fail(res, 401, 'OTP_INVALID', 'Неверный код');
-      }
+      if (!otp.has(String(body.request_id || ''))) return fail(res, 401, 'OTP_INVALID', 'Неверный код');
       const web = isWeb(req);
       const prev = web ? cookieRefresh(req) : '';
-      if (prev && refreshByToken.has(prev)) {
-        revokeSid(refreshByToken.get(prev).sid);
-      }
+      if (prev && refreshByToken.has(prev)) revokeSid(refreshByToken.get(prev).sid);
       const patient = Number(body.patient_id) === PROFILE_B.patient_id ? 'B' : 'A';
       return ok(res, issueTokens(res, web, patient));
     }
@@ -223,19 +217,31 @@ const server = http.createServer(async (req, res) => {
       const web = isWeb(req);
       const body = await readBody(req);
       const token = web ? cookieRefresh(req) : String(body.refresh || '');
-      if (!token || !refreshByToken.has(token)) {
-        if (web) {
-          res.setHeader('Set-Cookie', 'lk_refresh=; Path=/api/auth; Max-Age=0; HttpOnly; SameSite=Strict');
-        }
+      const meta = token ? refreshByToken.get(token) : null;
+      if (!token || !meta) {
+        if (web) res.setHeader('Set-Cookie', 'lk_refresh=; Path=/api/auth; Max-Age=0; HttpOnly; SameSite=Strict');
         return fail(res, 401, 'UNAUTHORIZED', 'Unauthorized');
       }
-      const meta = refreshByToken.get(token);
+      const now = Date.now();
+      if (meta.revokedAt != null) {
+        if (now - meta.revokedAt < RACE_MS && sidHasLive(meta.sid)) {
+          return fail(res, 409, 'REFRESH_RACE', 'Повторный refresh');
+        }
+        revokeSid(meta.sid);
+        if (web) res.setHeader('Set-Cookie', 'lk_refresh=; Path=/api/auth; Max-Age=0; HttpOnly; SameSite=Strict');
+        return fail(res, 401, 'UNAUTHORIZED', 'Unauthorized');
+      }
+      if (now > meta.expiresAt || now >= meta.sessionExpiresAt) {
+        revokeSid(meta.sid);
+        if (web) res.setHeader('Set-Cookie', 'lk_refresh=; Path=/api/auth; Max-Age=0; HttpOnly; SameSite=Strict');
+        return fail(res, 401, 'UNAUTHORIZED', 'Unauthorized');
+      }
       const expected = String(body.session || '');
       if (expected && expected !== meta.sid) {
         return fail(res, 409, 'SESSION_CHANGED', 'Сессия изменилась');
       }
-      refreshByToken.delete(token);
-      return ok(res, issueTokens(res, web, meta.patient));
+      meta.revokedAt = now;
+      return ok(res, issueTokens(res, web, meta.patient, meta.sid, meta.sessionExpiresAt));
     }
 
     if (method === 'POST' && path === '/api/auth/logout') {
@@ -246,11 +252,8 @@ const server = http.createServer(async (req, res) => {
       let clear = true;
       if (token && refreshByToken.has(token)) {
         const meta = refreshByToken.get(token);
-        if (expected && expected !== meta.sid) {
-          clear = false;
-        } else {
-          revokeSid(meta.sid);
-        }
+        if (expected && expected !== meta.sid) clear = false;
+        else revokeSid(meta.sid);
       }
       if (web && clear) {
         res.setHeader('Set-Cookie', 'lk_refresh=; Path=/api/auth; Max-Age=0; HttpOnly; SameSite=Strict');
@@ -266,10 +269,8 @@ const server = http.createServer(async (req, res) => {
         return fail(res, 401, 'UNAUTHORIZED', 'Unauthorized');
       }
       const label = accessPatient.get(token) || 'A';
-      const profile = label === 'B' ? PROFILE_B : PROFILE_A;
-      const appts = label === 'B' ? APPTS_B : APPTS_A;
-      if (method === 'GET' && path === '/api/me/profile') return ok(res, profile);
-      if (method === 'GET' && path === '/api/me/appointments') return ok(res, appts);
+      if (method === 'GET' && path === '/api/me/profile') return ok(res, label === 'B' ? PROFILE_B : PROFILE_A);
+      if (method === 'GET' && path === '/api/me/appointments') return ok(res, label === 'B' ? APPTS_B : APPTS_A);
       if (method === 'GET' && path === '/api/me/visits') return ok(res, VISITS);
       return fail(res, 404, 'NOT_FOUND', 'Not found');
     }

@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import { ApiError, requestOtp, verifyOtp } from '../api/client';
-import type { OtpVerifyResult, PatientCandidate } from '../api/types';
+import type { OtpVerifyResult, PatientCandidate, TokenPair } from '../api/types';
 import { isStaleSessionError } from '../session/sessionGate';
 import { ErrorBox } from '../ui/ErrorBox';
 import { formatPhoneMask, sanitizeCode, toApiPhone } from '../ui/phone';
 
 type Props = {
-  onTokens: (access: string, session?: string) => void;
+  onTokens: (tokens: TokenPair) => void;
   onCandidates: (requestId: string, candidates: PatientCandidate[]) => void;
 };
 
@@ -61,7 +61,7 @@ export function LoginScreen({ onTokens, onCandidates }: Props) {
         return;
       }
       if (res.access) {
-        onTokens(res.access, res.session);
+        onTokens(res);
         return;
       }
       setErr({ code: 'INTERNAL', status: 500 });

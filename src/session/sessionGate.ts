@@ -1,8 +1,11 @@
 /** In-memory session generation + opaque server session id for this tab. */
 
-export const TAB_CHANNEL = 'lk-patient-web-session';
+export const TAB_CHANNEL = 'lk-cabinet-tab';
+export const CABINET_LOCK = 'lk-cabinet';
+export const LOGOUT_FLAG = 'lk_logout';
 export const LOGOUT_TIMEOUT_MS = 5_000;
 export const REFRESH_RACE_RETRY_MS = 300;
+export const ACCESS_REFRESH_SKEW_MS = 30_000;
 
 export class StaleSessionError extends Error {
   constructor() {
@@ -30,14 +33,18 @@ let generation = 0;
 let controller = new AbortController();
 let logoutWait: Promise<void> | null = null;
 let serverSession: string | null = null;
+/** Controllable clock for access-expiry timers (tests may replace). */
+export let nowMs = () => Date.now();
+export function setNowMs(fn: () => number): void {
+  nowMs = fn;
+}
+
 const tabId =
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
     : `tab-${Math.random().toString(36).slice(2)}`;
 
-export type TabMessage =
-  | { type: 'logout'; tabId: string; session?: string }
-  | { type: 'login'; tabId: string; session?: string };
+export type TabMessage = { type: 'takeover'; tabId: string };
 
 let channel: BroadcastChannel | null = null;
 let channelListener: ((msg: TabMessage) => void) | null = null;
@@ -109,7 +116,31 @@ export function combineSignals(primary: AbortSignal, extra?: AbortSignal): Abort
   return out.signal;
 }
 
-/** One permanent BroadcastChannel per tab; ignore own tabId. */
+export function setLogoutFlag(): void {
+  try {
+    sessionStorage.setItem(LOGOUT_FLAG, '1');
+  } catch {
+    // ignore
+  }
+}
+
+export function hasLogoutFlag(): boolean {
+  try {
+    return sessionStorage.getItem(LOGOUT_FLAG) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function clearLogoutFlag(): void {
+  try {
+    sessionStorage.removeItem(LOGOUT_FLAG);
+  } catch {
+    // ignore
+  }
+}
+
+/** Permanent BroadcastChannel for takeover only; ignore own tabId. */
 export function ensureTabChannel(onMessage: (msg: TabMessage) => void): () => void {
   channelListener = onMessage;
   if (!channel) {
@@ -129,7 +160,7 @@ export function ensureTabChannel(onMessage: (msg: TabMessage) => void): () => vo
   };
 }
 
-export function broadcastTab(msg: Omit<TabMessage, 'tabId'>): void {
+export function broadcastTakeover(): void {
   if (!channel) {
     try {
       channel = new BroadcastChannel(TAB_CHANNEL);
@@ -137,15 +168,61 @@ export function broadcastTab(msg: Omit<TabMessage, 'tabId'>): void {
       return;
     }
   }
-  channel.postMessage({ ...msg, tabId });
+  channel.postMessage({ type: 'takeover', tabId } satisfies TabMessage);
 }
 
-/** Cross-tab refresh serialization; falls back to direct call when locks are missing. */
-export async function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
-  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
-  if (!locks?.request) return fn();
-  return locks.request('lk-patient-web-refresh', fn);
+export function locksSupported(): boolean {
+  return typeof navigator !== 'undefined' && !!navigator.locks?.request;
 }
 
-/** Legacy name used by older imports. */
-export const LOGOUT_CHANNEL = TAB_CHANNEL;
+type LockHandle = { release: () => void };
+
+/**
+ * Hold the exclusive cabinet lock for the lifetime of this tab.
+ * Returns null if another tab already holds it (ifAvailable).
+ */
+export async function acquireCabinetLock(): Promise<LockHandle | null> {
+  const locks = navigator.locks;
+  if (!locks?.request) return null;
+
+  let release!: () => void;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+
+  const got = await new Promise<boolean>((resolve) => {
+    void locks.request(CABINET_LOCK, { ifAvailable: true }, async (lock) => {
+      if (!lock) {
+        resolve(false);
+        return;
+      }
+      resolve(true);
+      await held;
+    });
+  });
+
+  if (!got) return null;
+  return { release };
+}
+
+/** Blocking acquire after the previous owner released (e.g. «Открыть здесь»). */
+export async function waitCabinetLock(): Promise<LockHandle> {
+  const locks = navigator.locks;
+  if (!locks?.request) {
+    return { release: () => undefined };
+  }
+  let release!: () => void;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  let acquired!: () => void;
+  const ready = new Promise<void>((r) => {
+    acquired = r;
+  });
+  void locks.request(CABINET_LOCK, async () => {
+    acquired();
+    await held;
+  });
+  await ready;
+  return { release };
+}
