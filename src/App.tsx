@@ -6,7 +6,7 @@ import {
   ensureFreshAccess,
   loadRuntimeConfig,
   logoutAfterFlag,
-  logoutSession,
+  logoutClearingFlag,
   quietBootstrap,
   refreshSession,
   resetSharedRefresh,
@@ -22,6 +22,7 @@ import {
   acquireCabinetLock,
   advanceSession,
   broadcastTakeover,
+  clearLogoutFlag,
   ensureTabChannel,
   getGeneration,
   getServerSession,
@@ -68,12 +69,15 @@ export function App() {
     const session = getServerSession();
     setLogoutFlag();
     endLocalSession();
-    await trackLogoutNetwork(() => logoutSession(session));
+    // Clear lk_logout on HTTP response; keep on network error / 5s abort (Э1).
+    await trackLogoutNetwork(() => logoutClearingFlag(session).then(() => undefined));
   }, [endLocalSession]);
 
   const enterCabinet = useCallback((tokens: TokenPair) => {
     advanceSession();
     resetSharedRefresh();
+    // Successful verify/select-patient: previous browser session is already ended on the server.
+    clearLogoutFlag();
     applyTokens(tokens);
     setPhase({ kind: 'cabinet', tab: 'appointments' });
   }, []);

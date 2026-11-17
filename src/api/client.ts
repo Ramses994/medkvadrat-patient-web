@@ -335,19 +335,28 @@ export function logoutSession(session?: string | null): Promise<void> {
   }).finally(() => window.clearTimeout(timer));
 }
 
-/** Logout after F5 with the logout flag: no session in body; clear flag unless NETWORK. */
-export async function logoutAfterFlag(): Promise<'ok' | 'network'> {
+/**
+ * Run logout and clear lk_logout after any HTTP outcome.
+ * Keep the flag on network failure or the 5s client abort (Э1).
+ */
+export async function logoutClearingFlag(session?: string | null): Promise<'ok' | 'keep'> {
   try {
-    await logoutSession(null);
+    await logoutSession(session);
     clearLogoutFlag();
     return 'ok';
   } catch (e) {
-    if (e instanceof ApiError && e.code === 'NETWORK') {
-      return 'network';
-    }
+    if (e instanceof ApiError && e.code === 'NETWORK') return 'keep';
+    // logoutSession maps the 5s AbortController abort to StaleSessionError.
+    if (isStaleSessionError(e)) return 'keep';
     clearLogoutFlag();
     return 'ok';
   }
+}
+
+/** Logout after F5 with the logout flag: no session in body; clear flag unless keep. */
+export async function logoutAfterFlag(): Promise<'ok' | 'network'> {
+  const result = await logoutClearingFlag(null);
+  return result === 'keep' ? 'network' : 'ok';
 }
 
 export function getProfile(): Promise<Profile> {

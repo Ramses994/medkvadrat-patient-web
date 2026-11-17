@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   configureSessionHooks,
+  logoutClearingFlag,
   logoutSession,
   quietBootstrap,
   refreshSession,
@@ -149,5 +150,22 @@ describe('fixes-4 session client', () => {
     const ok = await quietBootstrap();
     expect(ok).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('clears logout flag after logout HTTP response', async () => {
+    setLogoutFlag();
+    setServerSession('sid-1');
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+    await expect(logoutClearingFlag('sid-1')).resolves.toBe('ok');
+    expect(hasLogoutFlag()).toBe(false);
+  });
+
+  it('keeps logout flag on network error', async () => {
+    setLogoutFlag();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    await expect(logoutClearingFlag(null)).resolves.toBe('keep');
+    expect(hasLogoutFlag()).toBe(true);
   });
 });

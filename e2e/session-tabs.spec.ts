@@ -136,6 +136,53 @@ test('Ш6-4: delayed logout then F5 before reply — login, no refresh, logout r
   expect(logoutHits).toBeGreaterThanOrEqual(1);
 });
 
+test('Э1-1: logout response then login then F5 keeps cabinet', async ({ page }) => {
+  let logoutDone = false;
+  await page.route('**/api/auth/logout', async (route) => {
+    await route.continue();
+    logoutDone = true;
+  });
+
+  await login(page);
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+  await page.getByRole('button', { name: 'Выйти' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible();
+  await expect.poll(() => logoutDone).toBe(true);
+
+  await login(page);
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Вход' })).toHaveCount(0);
+});
+
+test('Э1-2: logout delayed >5s then login then F5 — cabinet, no second logout', async ({
+  page,
+}) => {
+  let logoutHits = 0;
+  await page.route('**/api/auth/logout', async (route) => {
+    logoutHits += 1;
+    await new Promise((r) => setTimeout(r, 8_000));
+    await route.fulfill({ status: 204 });
+  });
+
+  await login(page);
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+  await page.getByRole('button', { name: 'Выйти' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible({ timeout: 2000 });
+  expect(logoutHits).toBe(1);
+
+  // OTP unlocks after LOGOUT_TIMEOUT_MS (5s) even while logout is still held.
+  await page.waitForTimeout(5_100);
+  await login(page);
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible({ timeout: 15_000 });
+  const hitsAfterLogin = logoutHits;
+
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+  expect(logoutHits).toBe(hitsAfterLogin);
+});
+
 test('Ш6-5: 5 min session left, clocks +6 min → login', async ({ page }) => {
   await page.clock.install();
   await page.route('**/api/auth/otp/verify', async (route) => {
