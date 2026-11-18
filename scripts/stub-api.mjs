@@ -19,6 +19,8 @@ const accessPatient = new Map();
 let accessSeq = 1;
 let refreshSeq = 1;
 let sidSeq = 1;
+/** Test hook: delay refresh responses by this many ms (Ю3). */
+let refreshDelayMs = 0;
 
 const PROFILE_A = {
   patient_id: 900001,
@@ -165,6 +167,12 @@ const server = http.createServer(async (req, res) => {
   try {
     if (method === 'GET' && path === '/api/health') return ok(res, { status: 'ok' });
 
+    if (method === 'POST' && path === '/api/stub/refresh-delay') {
+      const body = await readBody(req);
+      refreshDelayMs = Math.max(0, Number(body.ms) || 0);
+      return ok(res, { refreshDelayMs });
+    }
+
     if (method === 'POST' && path === '/api/auth/otp/request') {
       const body = await readBody(req);
       const phone = String(body.phone || '');
@@ -214,6 +222,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (method === 'POST' && path === '/api/auth/refresh') {
+      if (refreshDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, refreshDelayMs));
+      }
       const web = isWeb(req);
       const body = await readBody(req);
       const token = web ? cookieRefresh(req) : String(body.refresh || '');
@@ -254,6 +265,9 @@ const server = http.createServer(async (req, res) => {
         const meta = refreshByToken.get(token);
         if (expected && expected !== meta.sid) clear = false;
         else revokeSid(meta.sid);
+      } else if (expected) {
+        // Body session id alone must revoke the whole sid (cookie may already be gone).
+        revokeSid(expected);
       }
       if (web && clear) {
         res.setHeader('Set-Cookie', 'lk_refresh=; Path=/api/auth; Max-Age=0; HttpOnly; SameSite=Strict');

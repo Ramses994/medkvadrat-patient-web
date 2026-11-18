@@ -24,7 +24,37 @@ async function twoPages(browser: Browser) {
   return { context, page1, page2 };
 }
 
-test('Ш6-1: cabinet in tab1, tab2 shows already open with no API', async ({ browser }) => {
+function waitingMessage(page: Page) {
+  return page.getByRole('heading', { name: 'Личный кабинет открыт в другой вкладке' });
+}
+
+async function stubRefreshDelay(page: Page, ms: number) {
+  await page.evaluate(async (delay) => {
+    await fetch('/api/stub/refresh-delay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ms: delay }),
+    });
+  }, ms);
+}
+
+async function setVerifyExpiresIn(page: Page, sec: number) {
+  await page.route('**/api/auth/otp/verify', async (route) => {
+    const res = await route.fetch();
+    const json = await res.json();
+    if (json?.data?.access) {
+      json.data.access_expires_in = sec;
+    }
+    await route.fulfill({
+      status: res.status(),
+      contentType: 'application/json',
+      headers: { 'Set-Cookie': res.headers()['set-cookie'] || '' },
+      body: JSON.stringify(json),
+    });
+  });
+}
+
+test('Ш6-1: cabinet in tab1, tab2 shows waiting with no API', async ({ browser }) => {
   const { context, page1, page2 } = await twoPages(browser);
   let apiFrom2 = 0;
   await page2.route('**/api/**', async (route) => {
@@ -37,62 +67,44 @@ test('Ш6-1: cabinet in tab1, tab2 shows already open with no API', async ({ bro
   await expect(page1.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
 
   await page2.goto('/');
-  await expect(
-    page2.getByRole('heading', { name: 'Личный кабинет уже открыт в другой вкладке' }),
-  ).toBeVisible();
+  await expect(waitingMessage(page2)).toBeVisible();
+  await expect(page2.getByText('Закройте её — кабинет откроется здесь')).toBeVisible();
   expect(apiFrom2).toBe(0);
   await context.close();
 });
 
-test('Ш6-2: Open here moves cabinet without logout', async ({ browser }) => {
+test('Ш6-2 / Ю3-5: close tab1 → tab2 gets cabinet without Open here', async ({ browser }) => {
   const { context, page1, page2 } = await twoPages(browser);
-  let logoutHits = 0;
-  for (const p of [page1, page2]) {
-    await p.route('**/api/auth/logout', async (route) => {
-      logoutHits += 1;
-      await route.continue();
-    });
-  }
+  let apiFrom2 = 0;
+  await page2.route('**/api/**', async (route) => {
+    apiFrom2 += 1;
+    await route.continue();
+  });
 
   await page1.goto('/');
   await login(page1);
   await expect(page1.getByText('Петров Пётр Петрович')).toBeVisible();
 
   await page2.goto('/');
-  await expect(
-    page2.getByRole('heading', { name: 'Личный кабинет уже открыт в другой вкладке' }),
-  ).toBeVisible();
-  await page2.getByRole('button', { name: 'Открыть здесь' }).click();
+  await expect(waitingMessage(page2)).toBeVisible();
+  expect(apiFrom2).toBe(0);
 
-  await expect(page1.getByRole('heading', { name: 'Кабинет открыт в другой вкладке' })).toBeVisible();
-  await expect(page1.getByText('Петров Пётр Петрович')).toHaveCount(0);
-  await expect(page2.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+  await page1.close();
+  await expect(page2.getByRole('heading', { name: 'Мои записи' })).toBeVisible({ timeout: 15_000 });
   await expect(page2.getByText('Петров Пётр Петрович')).toBeVisible();
-  expect(logoutHits).toBe(0);
   await context.close();
 });
 
-test('Ш6-3: close tab1, F5 on tab2 opens cabinet', async ({ browser }) => {
+test('Ш6-3: close tab1 while tab2 waiting → cabinet without reload', async ({ browser }) => {
   const { context, page1, page2 } = await twoPages(browser);
   await page1.goto('/');
   await login(page1);
   await expect(page1.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
 
   await page2.goto('/');
-  await expect(
-    page2.getByRole('heading', { name: 'Личный кабинет уже открыт в другой вкладке' }),
-  ).toBeVisible();
+  await expect(waitingMessage(page2)).toBeVisible();
   await page1.close();
-  // Lock release after close can lag briefly; reload until this tab can boot.
-  await expect
-    .poll(
-      async () => {
-        await page2.reload();
-        return page2.getByRole('heading', { name: 'Мои записи' }).isVisible();
-      },
-      { timeout: 15_000, intervals: [200, 400, 800] },
-    )
-    .toBe(true);
+  await expect(page2.getByRole('heading', { name: 'Мои записи' })).toBeVisible({ timeout: 15_000 });
   await context.close();
 });
 
@@ -108,7 +120,6 @@ test('Ш6-4: delayed logout then F5 before reply — login, no refresh, logout r
 
   await page.route('**/api/auth/logout', async (route) => {
     logoutHits += 1;
-    // Hold only the first (manual) logout; the post-F5 flag logout must finish.
     if (logoutHits === 1) {
       await held;
       await route.continue();
@@ -172,7 +183,6 @@ test('Э1-2: logout delayed >5s then login then F5 — cabinet, no second logout
   await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible({ timeout: 2000 });
   expect(logoutHits).toBe(1);
 
-  // OTP unlocks after LOGOUT_TIMEOUT_MS (5s) even while logout is still held.
   await page.waitForTimeout(5_100);
   await login(page);
   await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible({ timeout: 15_000 });
@@ -183,22 +193,21 @@ test('Э1-2: logout delayed >5s then login then F5 — cabinet, no second logout
   expect(logoutHits).toBe(hitsAfterLogin);
 });
 
-test('Ш6-5: 5 min session left, clocks +6 min → login', async ({ page }) => {
+test('Ю3-1: displayUntil + delayed refresh 401 → checking then login', async ({ page }) => {
   await page.clock.install();
-  await page.route('**/api/auth/otp/verify', async (route) => {
-    const res = await route.fetch();
-    const json = await res.json();
-    if (json?.data?.access) {
-      json.data.access_expires_in = 300;
-    }
-    await route.fulfill({
-      status: res.status(),
-      contentType: 'application/json',
-      headers: { 'Set-Cookie': res.headers()['set-cookie'] || '' },
-      body: JSON.stringify(json),
-    });
+  await setVerifyExpiresIn(page, 300);
+  await login(page);
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+  await page.getByRole('button', { name: 'Профиль' }).click();
+  await expect(page.getByText('Иванов Иван Иванович')).toBeVisible();
+
+  await stubRefreshDelay(page, 1_500);
+  let releaseRefresh!: () => void;
+  const held = new Promise<void>((r) => {
+    releaseRefresh = r;
   });
   await page.route('**/api/auth/refresh', async (route) => {
+    await held;
     await route.fulfill({
       status: 401,
       contentType: 'application/json',
@@ -209,42 +218,126 @@ test('Ш6-5: 5 min session left, clocks +6 min → login', async ({ page }) => {
     });
   });
 
-  await login(page);
-  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
-  await page.getByRole('button', { name: 'Профиль' }).click();
   await page.clock.fastForward(6 * 60 * 1000);
+  await expect(page.getByRole('heading', { name: 'Проверяем сессию…' })).toBeVisible();
+  await expect(page.getByText('Иванов Иван Иванович')).toHaveCount(0);
+
+  releaseRefresh();
   await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible({ timeout: 10_000 });
 });
 
-test('Ш6-6: login A → logout → login B with delayed A → only B', async ({ page }) => {
+test('Ю3-2: displayUntil after hidden→visible → checking then login', async ({ page }) => {
+  await page.clock.install();
+  await setVerifyExpiresIn(page, 300);
+  await login(page);
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+
   let releaseRefresh!: () => void;
   const held = new Promise<void>((r) => {
     releaseRefresh = r;
   });
+  await page.route('**/api/auth/refresh', async (route) => {
+    await held;
+    await route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: false,
+        error_details: { code: 'UNAUTHORIZED', message: 'Unauthorized' },
+      }),
+    });
+  });
+
+  // Expire displayUntil while "hidden", then resume via visibilitychange.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.clock.fastForward(6 * 60 * 1000);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+
+  await expect(page.getByRole('heading', { name: 'Проверяем сессию…' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toHaveCount(0);
+
+  releaseRefresh();
+  await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible({ timeout: 10_000 });
+});
+
+test('Ю3-3: 30s TTL, successful refresh — at most two refresh in 60s', async ({ page }) => {
+  await page.clock.install();
+  let refreshHits = 0;
+  await setVerifyExpiresIn(page, 30);
+  await page.route('**/api/auth/refresh', async (route) => {
+    refreshHits += 1;
+    const res = await route.fetch();
+    const json = await res.json();
+    if (json?.data?.access) json.data.access_expires_in = 30;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const setCookie = res.headers()['set-cookie'];
+    if (setCookie) headers['Set-Cookie'] = setCookie;
+    await route.fulfill({ status: res.status(), headers, body: JSON.stringify(json) });
+  });
+
+  await login(page);
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+  refreshHits = 0;
+
+  await page.clock.fastForward(60_000);
+  await page.waitForTimeout(500);
+  expect(refreshHits).toBeLessThanOrEqual(2);
+  await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+});
+
+test('Ю3-4: delayed logout, close tab1 → tab2 login after revoke', async ({ browser }) => {
+  const { context, page1, page2 } = await twoPages(browser);
+  let releaseLogout!: () => void;
+  const held = new Promise<void>((r) => {
+    releaseLogout = r;
+  });
+
+  await page1.route('**/api/auth/logout', async (route) => {
+    await held;
+    await route.continue();
+  });
+
+  await page1.goto('/');
+  await login(page1);
+  await expect(page1.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
+
+  await page2.goto('/');
+  await expect(waitingMessage(page2)).toBeVisible();
+
+  await page1.getByRole('button', { name: 'Выйти' }).first().click();
+  await expect(page1.getByRole('heading', { name: 'Вход' })).toBeVisible();
+  releaseLogout();
+  await page1.waitForTimeout(400);
+  await page1.close();
+
+  // Tab2 acquires lock and boots; cookie revoked → login.
+  await expect(page2.getByRole('heading', { name: 'Вход' })).toBeVisible({ timeout: 15_000 });
+  await context.close();
+});
+
+test('Ш6-6 / Ю3-6: delayed profile A then login B → only B', async ({ page }) => {
+  let releaseProfile!: () => void;
+  const held = new Promise<void>((r) => {
+    releaseProfile = r;
+  });
   let armHold = false;
 
-  await page.route('**/api/auth/refresh', async (route) => {
+  await page.route('**/api/me/profile', async (route) => {
     if (armHold) {
       armHold = false;
       await held;
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        headers: {
-          'Set-Cookie': 'lk_refresh=stale-A; Path=/api/auth; HttpOnly; SameSite=Strict',
-        },
-        body: JSON.stringify({
-          success: true,
-          data: { access: 'access-stale-A', access_expires_in: 900, session: 'sid-stale-A' },
-        }),
-      });
-      return;
-    }
-    await route.continue();
-  });
-  await page.route('**/api/me/**', async (route) => {
-    const auth = route.request().headers()['authorization'] || '';
-    if (auth.includes('access-stale-A')) {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -266,32 +359,15 @@ test('Ш6-6: login A → logout → login B with delayed A → only B', async ({
   await login(page);
   await expect(page.getByText('Петров Пётр Петрович')).toBeVisible();
 
-  let profile401 = false;
-  await page.route('**/api/me/profile', async (route) => {
-    if (!profile401) {
-      profile401 = true;
-      armHold = true;
-      await route.fulfill({
-        status: 401,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          success: false,
-          error_details: { code: 'UNAUTHORIZED', message: 'Unauthorized' },
-        }),
-      });
-      return;
-    }
-    await route.fallback();
-  });
-
+  armHold = true;
   await page.getByRole('button', { name: 'Профиль' }).click();
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(300);
   await page.getByRole('button', { name: 'Выйти' }).first().click();
   await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible();
   await login(page, '+7 900 000-00-00', 'CodeB');
   await expect(page.getByText('Козлов Козьма Козьмич')).toBeVisible();
 
-  releaseRefresh();
+  releaseProfile();
   await page.waitForTimeout(800);
   await expect(page.getByText('Пациент Сессия А')).toHaveCount(0);
   await expect(page.getByText('Козлов Козьма Козьмич')).toBeVisible();
@@ -324,26 +400,24 @@ test('Ш4: idle logout body includes session id', async ({ page }) => {
   expect(JSON.parse(logoutBody).session).toMatch(/^sid-/);
 });
 
-test('Ш6-7: two tabs open simultaneously — one cabinet, one already open', async ({ browser }) => {
+test('Ш6-7: two tabs open simultaneously — one owner, one waiting', async ({ browser }) => {
   const { context, page1, page2 } = await twoPages(browser);
-  const p1 = page1.goto('/');
-  const p2 = page2.goto('/');
-  await Promise.all([p1, p2]);
+  await Promise.all([page1.goto('/'), page2.goto('/')]);
 
-  const h1Blocked = page1.getByRole('heading', { name: 'Личный кабинет уже открыт в другой вкладке' });
-  const h2Blocked = page2.getByRole('heading', { name: 'Личный кабинет уже открыт в другой вкладке' });
+  const h1Waiting = waitingMessage(page1);
+  const h2Waiting = waitingMessage(page2);
   const h1Login = page1.getByRole('heading', { name: 'Вход' });
   const h2Login = page2.getByRole('heading', { name: 'Вход' });
 
   await expect
     .poll(async () => {
-      const b1 = await h1Blocked.isVisible().catch(() => false);
-      const b2 = await h2Blocked.isVisible().catch(() => false);
+      const w1 = await h1Waiting.isVisible().catch(() => false);
+      const w2 = await h2Waiting.isVisible().catch(() => false);
       const l1 = await h1Login.isVisible().catch(() => false);
       const l2 = await h2Login.isVisible().catch(() => false);
-      const cabinets = (l1 ? 1 : 0) + (l2 ? 1 : 0);
-      const blocked = (b1 ? 1 : 0) + (b2 ? 1 : 0);
-      return cabinets === 1 && blocked === 1;
+      const owners = (l1 ? 1 : 0) + (l2 ? 1 : 0);
+      const waiting = (w1 ? 1 : 0) + (w2 ? 1 : 0);
+      return owners === 1 && waiting === 1;
     })
     .toBe(true);
 

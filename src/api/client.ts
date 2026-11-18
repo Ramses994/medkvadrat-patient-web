@@ -20,6 +20,7 @@ import {
   isSessionChangedError,
   isStaleSessionError,
   nowMs,
+  PREEMPT_REFRESH_MIN_TTL_SEC,
   REFRESH_RACE_RETRY_MS,
   SessionChangedError,
   setServerSession,
@@ -45,48 +46,76 @@ type RefreshFn = () => Promise<boolean>;
 
 let refreshFn: RefreshFn | null = null;
 let refreshInFlight: Promise<boolean> | null = null;
+let refreshSessionInFlight: Promise<TokenPair> | null = null;
 let onSessionLost: (() => void) | null = null;
 let onSessionChanged: (() => void) | null = null;
-let accessExpiresAtMs = 0;
-let accessRefreshTimer = 0;
-let onAccessRefreshDue: (() => void) | null = null;
+let displayUntilMs = 0;
+let displayExpiryTimer = 0;
+let preemptRefreshTimer = 0;
+let onDisplayExpired: (() => void) | null = null;
+let onPreemptRefresh: (() => void) | null = null;
 
 export function configureSessionHooks(hooks: {
   refresh: RefreshFn;
   onSessionLost: () => void;
   onSessionChanged?: () => void;
-  onAccessRefreshDue?: () => void;
+  onDisplayExpired?: () => void;
+  onPreemptRefresh?: () => void;
 }): void {
   refreshFn = hooks.refresh;
   onSessionLost = hooks.onSessionLost;
   onSessionChanged = hooks.onSessionChanged ?? null;
-  onAccessRefreshDue = hooks.onAccessRefreshDue ?? null;
+  onDisplayExpired = hooks.onDisplayExpired ?? null;
+  onPreemptRefresh = hooks.onPreemptRefresh ?? null;
 }
 
 export function resetSharedRefresh(): void {
   refreshInFlight = null;
+  refreshSessionInFlight = null;
 }
 
-export function getAccessExpiresAtMs(): number {
-  return accessExpiresAtMs;
+export function getDisplayUntilMs(): number {
+  return displayUntilMs;
+}
+
+/** Patient data may render only while the local display clock has not elapsed. */
+export function canDisplayPatientData(): boolean {
+  return displayUntilMs > 0 && nowMs() < displayUntilMs;
+}
+
+export function isDisplayExpired(): boolean {
+  return displayUntilMs > 0 && nowMs() >= displayUntilMs;
 }
 
 export function clearAccessSchedule(): void {
-  accessExpiresAtMs = 0;
-  if (accessRefreshTimer) {
-    window.clearTimeout(accessRefreshTimer);
-    accessRefreshTimer = 0;
+  displayUntilMs = 0;
+  if (displayExpiryTimer) {
+    window.clearTimeout(displayExpiryTimer);
+    displayExpiryTimer = 0;
+  }
+  if (preemptRefreshTimer) {
+    window.clearTimeout(preemptRefreshTimer);
+    preemptRefreshTimer = 0;
   }
 }
 
-function scheduleAccessRefresh(expiresInSec: number): void {
+function scheduleDisplayTimers(expiresInSec: number): void {
   clearAccessSchedule();
   const issued = nowMs();
-  accessExpiresAtMs = issued + Math.max(0, expiresInSec) * 1000;
-  const delay = Math.max(0, accessExpiresAtMs - issued - ACCESS_REFRESH_SKEW_MS);
-  accessRefreshTimer = window.setTimeout(() => {
-    onAccessRefreshDue?.();
-  }, delay);
+  const ttlMs = Math.max(0, expiresInSec) * 1000;
+  displayUntilMs = issued + ttlMs;
+
+  displayExpiryTimer = window.setTimeout(() => {
+    onDisplayExpired?.();
+  }, ttlMs);
+
+  // Preemptive refresh 30s before displayUntil only when TTL > 60s.
+  if (expiresInSec > PREEMPT_REFRESH_MIN_TTL_SEC) {
+    const delay = Math.max(0, ttlMs - ACCESS_REFRESH_SKEW_MS);
+    preemptRefreshTimer = window.setTimeout(() => {
+      onPreemptRefresh?.();
+    }, delay);
+  }
 }
 
 async function sharedRefresh(): Promise<boolean> {
@@ -110,7 +139,7 @@ async function sharedRefresh(): Promise<boolean> {
 }
 
 export function __testSharedRefreshState(): { inFlight: boolean } {
-  return { inFlight: refreshInFlight !== null };
+  return { inFlight: refreshInFlight !== null || refreshSessionInFlight !== null };
 }
 
 async function parseEnvelope<T>(res: Response): Promise<ApiEnvelope<T>> {
@@ -273,7 +302,7 @@ export function applyTokens(data: TokenPair): void {
   setAccessToken(data.access);
   if (data.session) setServerSession(data.session);
   if (typeof data.access_expires_in === 'number') {
-    scheduleAccessRefresh(data.access_expires_in);
+    scheduleDisplayTimers(data.access_expires_in);
   }
 }
 
@@ -294,7 +323,7 @@ async function refreshOnce(gen: number): Promise<TokenPair> {
   return data;
 }
 
-export async function refreshSession(): Promise<TokenPair> {
+async function refreshSessionInner(): Promise<TokenPair> {
   const gen = getGeneration();
   try {
     return await refreshOnce(gen);
@@ -312,6 +341,36 @@ export async function refreshSession(): Promise<TokenPair> {
       }
     }
     throw e;
+  }
+}
+
+/** At most one refresh in flight across preempt / displayUntil / 401 retry. */
+export async function refreshSession(): Promise<TokenPair> {
+  if (!refreshSessionInFlight) {
+    refreshSessionInFlight = refreshSessionInner().finally(() => {
+      refreshSessionInFlight = null;
+    });
+  }
+  return refreshSessionInFlight;
+}
+
+/**
+ * Ю1/Ю2: show «checking», then one refresh; only mutate UI if generation is still current.
+ */
+export async function revalidateDisplay(hooks: {
+  onChecking: () => void;
+  onOk: () => void;
+  onFail: () => void;
+}): Promise<void> {
+  const gen = getGeneration();
+  hooks.onChecking();
+  try {
+    await refreshSession();
+    if (!isCurrentGeneration(gen)) return;
+    hooks.onOk();
+  } catch {
+    if (!isCurrentGeneration(gen)) return;
+    hooks.onFail();
   }
 }
 
@@ -383,18 +442,6 @@ export async function quietBootstrap(): Promise<boolean> {
     clearAccessToken();
     setServerSession(null);
     clearAccessSchedule();
-    return false;
-  }
-}
-
-/** If access already expired (sleep/return), refresh before showing data. */
-export async function ensureFreshAccess(): Promise<boolean> {
-  if (!getAccessToken()) return false;
-  if (accessExpiresAtMs && nowMs() < accessExpiresAtMs) return true;
-  try {
-    await refreshSession();
-    return true;
-  } catch {
     return false;
   }
 }

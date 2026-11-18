@@ -1,11 +1,12 @@
 /** In-memory session generation + opaque server session id for this tab. */
 
-export const TAB_CHANNEL = 'lk-cabinet-tab';
 export const CABINET_LOCK = 'lk-cabinet';
 export const LOGOUT_FLAG = 'lk_logout';
 export const LOGOUT_TIMEOUT_MS = 5_000;
 export const REFRESH_RACE_RETRY_MS = 300;
 export const ACCESS_REFRESH_SKEW_MS = 30_000;
+/** Preemptive refresh only when access TTL is longer than this (seconds). */
+export const PREEMPT_REFRESH_MIN_TTL_SEC = 60;
 
 export class StaleSessionError extends Error {
   constructor() {
@@ -37,20 +38,6 @@ let serverSession: string | null = null;
 export let nowMs = () => Date.now();
 export function setNowMs(fn: () => number): void {
   nowMs = fn;
-}
-
-const tabId =
-  typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : `tab-${Math.random().toString(36).slice(2)}`;
-
-export type TabMessage = { type: 'takeover'; tabId: string };
-
-let channel: BroadcastChannel | null = null;
-let channelListener: ((msg: TabMessage) => void) | null = null;
-
-export function getTabId(): string {
-  return tabId;
 }
 
 export function getGeneration(): number {
@@ -140,37 +127,6 @@ export function clearLogoutFlag(): void {
   }
 }
 
-/** Permanent BroadcastChannel for takeover only; ignore own tabId. */
-export function ensureTabChannel(onMessage: (msg: TabMessage) => void): () => void {
-  channelListener = onMessage;
-  if (!channel) {
-    try {
-      channel = new BroadcastChannel(TAB_CHANNEL);
-      channel.onmessage = (ev: MessageEvent<TabMessage>) => {
-        const msg = ev.data;
-        if (!msg || typeof msg !== 'object' || msg.tabId === tabId) return;
-        channelListener?.(msg);
-      };
-    } catch {
-      channel = null;
-    }
-  }
-  return () => {
-    if (channelListener === onMessage) channelListener = null;
-  };
-}
-
-export function broadcastTakeover(): void {
-  if (!channel) {
-    try {
-      channel = new BroadcastChannel(TAB_CHANNEL);
-    } catch {
-      return;
-    }
-  }
-  channel.postMessage({ type: 'takeover', tabId } satisfies TabMessage);
-}
-
 export function locksSupported(): boolean {
   return typeof navigator !== 'undefined' && !!navigator.locks?.request;
 }
@@ -178,51 +134,36 @@ export function locksSupported(): boolean {
 type LockHandle = { release: () => void };
 
 /**
- * Hold the exclusive cabinet lock for the lifetime of this tab.
- * Returns null if another tab already holds it (ifAvailable).
+ * Hold the exclusive cabinet lock for this tab's lifetime.
+ * Uses a normal (queued) locks.request — if another tab holds it, onWaiting fires
+ * until that tab closes and this one acquires the lock.
  */
-export async function acquireCabinetLock(): Promise<LockHandle | null> {
-  const locks = navigator.locks;
-  if (!locks?.request) return null;
-
-  let release!: () => void;
-  const held = new Promise<void>((r) => {
-    release = r;
-  });
-
-  const got = await new Promise<boolean>((resolve) => {
-    void locks.request(CABINET_LOCK, { ifAvailable: true }, async (lock) => {
-      if (!lock) {
-        resolve(false);
-        return;
-      }
-      resolve(true);
-      await held;
-    });
-  });
-
-  if (!got) return null;
-  return { release };
-}
-
-/** Blocking acquire after the previous owner released (e.g. «Открыть здесь»). */
-export async function waitCabinetLock(): Promise<LockHandle> {
+export async function holdCabinetLock(onWaiting: () => void): Promise<LockHandle> {
   const locks = navigator.locks;
   if (!locks?.request) {
     return { release: () => undefined };
   }
+
   let release!: () => void;
   const held = new Promise<void>((r) => {
     release = r;
   });
+
   let acquired!: () => void;
   const ready = new Promise<void>((r) => {
     acquired = r;
   });
+
   void locks.request(CABINET_LOCK, async () => {
     acquired();
     await held;
   });
+
+  const waitingTimer = window.setTimeout(() => {
+    onWaiting();
+  }, 0);
+
   await ready;
+  window.clearTimeout(waitingTimer);
   return { release };
 }

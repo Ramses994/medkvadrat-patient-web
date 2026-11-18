@@ -6,6 +6,7 @@ import {
   quietBootstrap,
   refreshSession,
   resetSharedRefresh,
+  revalidateDisplay,
 } from './client';
 import {
   advanceSession,
@@ -167,5 +168,35 @@ describe('fixes-4 session client', () => {
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
     await expect(logoutClearingFlag(null)).resolves.toBe('keep');
     expect(hasLogoutFlag()).toBe(true);
+  });
+
+  it('Ю2: refresh cancelled by generation change does not call onFail', async () => {
+    const onChecking = vi.fn();
+    const onOk = vi.fn();
+    const onFail = vi.fn();
+    const fetchMock = vi.mocked(fetch);
+    let resolveFetch!: (r: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolveFetch = r;
+        }),
+    );
+
+    const pending = revalidateDisplay({ onChecking, onOk, onFail });
+    expect(onChecking).toHaveBeenCalledTimes(1);
+    advanceSession();
+    resolveFetch(
+      new Response(
+        JSON.stringify({
+          success: true,
+          data: { access: 'late', access_expires_in: 900, session: 'sid-late' },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    await pending;
+    expect(onOk).not.toHaveBeenCalled();
+    expect(onFail).not.toHaveBeenCalled();
   });
 });

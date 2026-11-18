@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   applyTokens,
+  canDisplayPatientData,
   clearAccessSchedule,
   configureSessionHooks,
-  ensureFreshAccess,
+  isDisplayExpired,
   loadRuntimeConfig,
   logoutAfterFlag,
   logoutClearingFlag,
   quietBootstrap,
   refreshSession,
   resetSharedRefresh,
+  revalidateDisplay,
 } from './api/client';
 import type { PatientCandidate, TokenPair } from './api/types';
 import { AppointmentsScreen } from './screens/AppointmentsScreen';
@@ -19,21 +21,18 @@ import { ProfileScreen } from './screens/ProfileScreen';
 import { SelectProfileScreen } from './screens/SelectProfileScreen';
 import { startIdleWatch } from './session/idle';
 import {
-  acquireCabinetLock,
   advanceSession,
-  broadcastTakeover,
   clearLogoutFlag,
-  ensureTabChannel,
   getGeneration,
   getServerSession,
   hasLogoutFlag,
+  holdCabinetLock,
   isCurrentGeneration,
   isSessionChangedError,
   locksSupported,
   setLogoutFlag,
   setServerSession,
   trackLogoutNetwork,
-  waitCabinetLock,
 } from './session/sessionGate';
 import { clearAccessToken } from './session/tokenStore';
 
@@ -41,16 +40,18 @@ type Tab = 'appointments' | 'history' | 'profile';
 type Phase =
   | { kind: 'boot' }
   | { kind: 'unsupported' }
-  | { kind: 'blocked' }
-  | { kind: 'taken' }
+  | { kind: 'waiting' }
+  | { kind: 'checking' }
   | { kind: 'login' }
   | { kind: 'select'; requestId: string; candidates: PatientCandidate[] }
   | { kind: 'cabinet'; tab: Tab };
 
 export function App() {
   const [phase, setPhase] = useState<Phase>({ kind: 'boot' });
+  const [ownsLock, setOwnsLock] = useState(false);
   const [clinicPhone, setClinicPhone] = useState('');
   const lockRelease = useRef<(() => void) | null>(null);
+  const cabinetTab = useRef<Tab>('appointments');
 
   const showLogin = useCallback(() => {
     setPhase({ kind: 'login' });
@@ -69,23 +70,38 @@ export function App() {
     const session = getServerSession();
     setLogoutFlag();
     endLocalSession();
-    // Clear lk_logout on HTTP response; keep on network error / 5s abort (Э1).
     await trackLogoutNetwork(() => logoutClearingFlag(session).then(() => undefined));
   }, [endLocalSession]);
 
   const enterCabinet = useCallback((tokens: TokenPair) => {
     advanceSession();
     resetSharedRefresh();
-    // Successful verify/select-patient: previous browser session is already ended on the server.
     clearLogoutFlag();
     applyTokens(tokens);
+    cabinetTab.current = 'appointments';
     setPhase({ kind: 'cabinet', tab: 'appointments' });
   }, []);
 
   const releaseLock = useCallback(() => {
     lockRelease.current?.();
     lockRelease.current = null;
+    setOwnsLock(false);
   }, []);
+
+  const showCabinet = useCallback((tab?: Tab) => {
+    const t = tab ?? cabinetTab.current;
+    cabinetTab.current = t;
+    setPhase({ kind: 'cabinet', tab: t });
+  }, []);
+
+  /** Ю1: hide data immediately, then one refresh; Ю2: ignore if generation changed. */
+  const runDisplayRevalidate = useCallback(() => {
+    void revalidateDisplay({
+      onChecking: () => setPhase({ kind: 'checking' }),
+      onOk: () => showCabinet(),
+      onFail: () => endLocalSession(),
+    });
+  }, [endLocalSession, showCabinet]);
 
   const bootCabinet = useCallback(async () => {
     const bootGen = getGeneration();
@@ -102,23 +118,9 @@ export function App() {
 
     const ok = await quietBootstrap();
     if (!isCurrentGeneration(bootGen)) return;
-    if (ok) setPhase({ kind: 'cabinet', tab: 'appointments' });
+    if (ok) showCabinet('appointments');
     else setPhase({ kind: 'login' });
-  }, []);
-
-  const openHere = useCallback(async () => {
-    broadcastTakeover();
-    releaseLock();
-    const handle = await waitCabinetLock();
-    lockRelease.current = handle.release;
-    advanceSession();
-    resetSharedRefresh();
-    clearAccessToken();
-    setServerSession(null);
-    clearAccessSchedule();
-    setPhase({ kind: 'boot' });
-    await bootCabinet();
-  }, [bootCabinet, releaseLock]);
+  }, [showCabinet]);
 
   useEffect(() => {
     configureSessionHooks({
@@ -137,31 +139,23 @@ export function App() {
       onSessionChanged: () => {
         endLocalSession();
       },
-      onAccessRefreshDue: () => {
+      onDisplayExpired: () => {
+        runDisplayRevalidate();
+      },
+      onPreemptRefresh: () => {
+        const gen = getGeneration();
         void (async () => {
           try {
             await refreshSession();
+            if (!isCurrentGeneration(gen)) return;
           } catch {
-            endLocalSession();
+            // Preempt failure: keep showing data until displayUntil; that path revalidates.
+            if (!isCurrentGeneration(gen)) return;
           }
         })();
       },
     });
-  }, [doLogout, endLocalSession]);
-
-  useEffect(() => {
-    return ensureTabChannel((msg) => {
-      if (msg.type !== 'takeover') return;
-      // Yield the cabinet: clear locally, no server logout.
-      advanceSession();
-      resetSharedRefresh();
-      clearAccessToken();
-      setServerSession(null);
-      clearAccessSchedule();
-      setPhase({ kind: 'taken' });
-      releaseLock();
-    });
-  }, [releaseLock]);
+  }, [doLogout, endLocalSession, runDisplayRevalidate]);
 
   useEffect(() => {
     let cancelled = false;
@@ -170,16 +164,16 @@ export function App() {
         if (!cancelled) setPhase({ kind: 'unsupported' });
         return;
       }
-      const handle = await acquireCabinetLock();
+      const handle = await holdCabinetLock(() => {
+        if (!cancelled) setPhase({ kind: 'waiting' });
+      });
       if (cancelled) {
-        handle?.release();
-        return;
-      }
-      if (!handle) {
-        setPhase({ kind: 'blocked' });
+        handle.release();
         return;
       }
       lockRelease.current = handle.release;
+      setOwnsLock(true);
+      setPhase({ kind: 'boot' });
       await bootCabinet();
     })();
     return () => {
@@ -189,86 +183,84 @@ export function App() {
   }, [bootCabinet, releaseLock]);
 
   useEffect(() => {
-    if (phase.kind !== 'cabinet') return;
+    if (!ownsLock || phase.kind !== 'cabinet') return;
     return startIdleWatch(() => {
       void doLogout();
     });
-  }, [phase.kind, doLogout]);
+  }, [ownsLock, phase.kind, doLogout]);
 
   useEffect(() => {
-    if (phase.kind !== 'cabinet') return;
-    const onVis = () => {
-      if (document.visibilityState !== 'visible') return;
-      void (async () => {
-        const ok = await ensureFreshAccess();
-        if (!ok) endLocalSession();
-      })();
+    if (!ownsLock) return;
+    const onResume = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (phase.kind !== 'cabinet' && phase.kind !== 'checking') return;
+      if (!isDisplayExpired()) return;
+      runDisplayRevalidate();
     };
-    document.addEventListener('visibilitychange', onVis);
-    window.addEventListener('focus', onVis);
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('focus', onResume);
+    window.addEventListener('pageshow', onResume);
     return () => {
-      document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('focus', onVis);
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('focus', onResume);
+      window.removeEventListener('pageshow', onResume);
     };
-  }, [phase.kind, endLocalSession]);
+  }, [ownsLock, phase.kind, runDisplayRevalidate]);
 
-  if (phase.kind === 'unsupported') {
+  // Login / cabinet / select only while this tab owns the lock.
+  if (!ownsLock) {
+    if (phase.kind === 'unsupported') {
+      return (
+        <div className="app-shell">
+          <header className="topbar">
+            <div className="brand">МедКвадрат</div>
+          </header>
+          <section className="panel stack">
+            <h1 className="heading-flush">Обновите браузер</h1>
+            <p className="muted">
+              Для входа в личный кабинет нужен современный браузер с поддержкой блокировок вкладок.
+            </p>
+          </section>
+        </div>
+      );
+    }
+    if (phase.kind === 'waiting') {
+      return (
+        <div className="app-shell">
+          <header className="topbar">
+            <div className="brand">МедКвадрат</div>
+          </header>
+          <section className="panel stack">
+            <h1 className="heading-flush">Личный кабинет открыт в другой вкладке</h1>
+            <p className="muted">Закройте её — кабинет откроется здесь</p>
+          </section>
+        </div>
+      );
+    }
     return (
       <div className="app-shell">
         <header className="topbar">
           <div className="brand">МедКвадрат</div>
         </header>
-        <section className="panel stack">
-          <h1 className="heading-flush">Обновите браузер</h1>
-          <p className="muted">Для входа в личный кабинет нужен современный браузер с поддержкой блокировок вкладок.</p>
-        </section>
+        <p className="muted">Открываем кабинет…</p>
       </div>
     );
   }
 
-  if (phase.kind === 'blocked') {
-    return (
-      <div className="app-shell">
-        <header className="topbar">
-          <div className="brand">МедКвадрат</div>
-        </header>
-        <section className="panel stack">
-          <h1 className="heading-flush">Личный кабинет уже открыт в другой вкладке</h1>
-          <p className="muted">Одновременно можно пользоваться только одной вкладкой кабинета.</p>
-          <button type="button" className="btn primary" onClick={() => void openHere()}>
-            Открыть здесь
-          </button>
-        </section>
-      </div>
-    );
-  }
-
-  if (phase.kind === 'taken') {
-    return (
-      <div className="app-shell">
-        <header className="topbar">
-          <div className="brand">МедКвадрат</div>
-        </header>
-        <section className="panel stack">
-          <h1 className="heading-flush">Кабинет открыт в другой вкладке</h1>
-          <p className="muted">Эта вкладка больше не показывает данные пациента.</p>
-        </section>
-      </div>
-    );
-  }
+  const showPatientData = phase.kind === 'cabinet' && canDisplayPatientData();
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand">МедКвадрат</div>
-        {phase.kind === 'cabinet' ? (
+        {showPatientData ? (
           <button type="button" className="btn ghost" onClick={() => void doLogout()}>
             Выйти
           </button>
         ) : null}
       </header>
 
-      {phase.kind === 'cabinet' ? (
+      {showPatientData ? (
         <nav className="nav" aria-label="Разделы">
           {(
             [
@@ -280,8 +272,11 @@ export function App() {
             <button
               key={id}
               type="button"
-              className={phase.tab === id ? 'active' : ''}
-              onClick={() => setPhase({ kind: 'cabinet', tab: id })}
+              className={phase.kind === 'cabinet' && phase.tab === id ? 'active' : ''}
+              onClick={() => {
+                cabinetTab.current = id;
+                setPhase({ kind: 'cabinet', tab: id });
+              }}
             >
               {label}
             </button>
@@ -290,6 +285,12 @@ export function App() {
       ) : null}
 
       {phase.kind === 'boot' ? <p className="muted">Открываем кабинет…</p> : null}
+      {phase.kind === 'checking' ? (
+        <section className="panel stack">
+          <h1 className="heading-flush">Проверяем сессию…</h1>
+          <p className="muted">Подождите, обновляем доступ к кабинету.</p>
+        </section>
+      ) : null}
 
       {phase.kind === 'login' ? (
         <LoginScreen
@@ -309,13 +310,13 @@ export function App() {
         />
       ) : null}
 
-      {phase.kind === 'cabinet' && phase.tab === 'appointments' ? (
+      {showPatientData && phase.tab === 'appointments' ? (
         <AppointmentsScreen clinicPhone={clinicPhone} />
       ) : null}
-      {phase.kind === 'cabinet' && phase.tab === 'history' ? <HistoryScreen /> : null}
-      {phase.kind === 'cabinet' && phase.tab === 'profile' ? <ProfileScreen /> : null}
+      {showPatientData && phase.tab === 'history' ? <HistoryScreen /> : null}
+      {showPatientData && phase.tab === 'profile' ? <ProfileScreen /> : null}
 
-      {phase.kind === 'cabinet' ? (
+      {showPatientData ? (
         <div className="footer-logout">
           <button type="button" className="btn ghost" onClick={() => void doLogout()}>
             Выйти
