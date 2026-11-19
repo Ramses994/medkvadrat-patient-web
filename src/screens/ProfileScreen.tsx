@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ApiError, getProfile } from '../api/client';
 import type { Profile } from '../api/types';
 import { isStaleSessionError } from '../session/sessionGate';
+import { formatBirthDate } from '../ui/datetime';
 import { ErrorBox } from '../ui/ErrorBox';
 
 export function ProfileScreen() {
@@ -30,8 +31,9 @@ export function ProfileScreen() {
     return <p className="muted">Загружаем профиль…</p>;
   }
 
+  // Phone/email: show API values as-is (already masked after А5) — no local re-masking.
   const birth = profile.birth_date
-    ? profile.birth_date
+    ? formatBirthDate(profile.birth_date)
     : profile.birth_year
       ? String(profile.birth_year)
       : '—';

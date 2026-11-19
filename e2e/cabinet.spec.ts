@@ -24,6 +24,87 @@ test('login shows upcoming appointments', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
   await expect(page.getByText('Петров Пётр Петрович')).toBeVisible();
   await expect(page.getByText('Вы записаны')).toBeVisible();
+  await expect(page.getByText('13 октября 2026, 16:40')).toBeVisible();
+});
+
+test('phone screen has no email wording; pilot delivery hint on code screen', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible();
+  await expect(page.getByText('Введите номер телефона из карточки клиники.')).toBeVisible();
+  await expect(page.getByText(/e-mail/i)).toHaveCount(0);
+  await page.getByLabel('Телефон').fill('');
+  await page.getByLabel('Телефон').fill('+7 900 000-00-00');
+  await page.getByRole('button', { name: 'Получить код' }).click();
+  await expect(
+    page.getByText('Тестовый режим: введите код, который выдал администратор пилота'),
+  ).toBeVisible();
+});
+
+test('code screen: email delivery text', async ({ page }) => {
+  await page.route('**/api/auth/otp/request', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: { request_id: 'req-email', ttl: 300, message: 'x', delivery: 'email' },
+      }),
+    });
+  });
+  await page.goto('/');
+  await page.getByLabel('Телефон').fill('');
+  await page.getByLabel('Телефон').fill('+7 900 000-00-00');
+  await page.getByRole('button', { name: 'Получить код' }).click();
+  await expect(page.getByText('Код отправлен на e-mail из карточки')).toBeVisible();
+});
+
+test('code screen: unknown delivery → neutral hint', async ({ page }) => {
+  await page.route('**/api/auth/otp/request', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: { request_id: 'req-x', ttl: 300, message: 'x', delivery: 'carrier-pigeon' },
+      }),
+    });
+  });
+  await page.goto('/');
+  await page.getByLabel('Телефон').fill('');
+  await page.getByLabel('Телефон').fill('+7 900 000-00-00');
+  await page.getByRole('button', { name: 'Получить код' }).click();
+  await expect(page.getByText('Введите код', { exact: true })).toBeVisible();
+});
+
+test('insecure context shows https screen and makes zero API requests', async ({ page }) => {
+  let apiHits = 0;
+  await page.route('**/api/**', async (route) => {
+    apiHits += 1;
+    await route.abort();
+  });
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'isSecureContext', {
+      configurable: true,
+      get: () => false,
+    });
+  });
+  await page.goto('/');
+  await expect(
+    page.getByText(
+      'Личный кабинет открывается только по защищённому адресу (https). Обратитесь в клинику.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Обновите браузер' })).toHaveCount(0);
+  expect(apiHits).toBe(0);
+});
+
+test('profile shows API phone/email as-is and one logout button', async ({ page }) => {
+  await login(page);
+  await page.getByRole('button', { name: 'Профиль' }).click();
+  await expect(page.getByText('15 мая 1990')).toBeVisible();
+  await expect(page.getByText('+7 *** ***-00-00')).toBeVisible();
+  await expect(page.getByText('i***@example.test')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Выйти' })).toHaveCount(1);
 });
 
 test('login with profile choice', async ({ page }) => {
@@ -306,3 +387,14 @@ test('quiet refresh 401 shows login', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible();
 });
+
+for (const timezoneId of ['Asia/Vladivostok', 'Europe/London'] as const) {
+  test(`В1: appointment wall time unchanged in ${timezoneId}`, async ({ browser }) => {
+    const context = await browser.newContext({ timezoneId });
+    const page = await context.newPage();
+    await login(page);
+    await expect(page.getByText('13 октября 2026, 16:40')).toBeVisible();
+    await expect(page.getByText('2026-10-13')).toHaveCount(0);
+    await context.close();
+  });
+}

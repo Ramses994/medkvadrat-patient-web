@@ -9,6 +9,8 @@ export type OtpRequestResult = {
   request_id: string;
   ttl: number;
   message: string;
+  /** From API А4: `pilot` | `email` (mode only; same for every phone). */
+  delivery?: string;
 };
 
 export type PatientCandidate = {

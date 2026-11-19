@@ -1,5 +1,10 @@
 const IDLE_MS = 15 * 60 * 1000;
 
+/** Keep the idle timer across cabinet → checking; session check is not user activity. */
+export function shouldWatchIdle(phaseKind: string): boolean {
+  return phaseKind === 'cabinet' || phaseKind === 'checking';
+}
+
 const ACTIVITY_EVENTS: (keyof WindowEventMap)[] = [
   'pointerdown',
   'keydown',
