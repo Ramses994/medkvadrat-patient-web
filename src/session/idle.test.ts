@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { IDLE_TIMEOUT_MS, startIdleWatch } from './idle';
+import { IDLE_TIMEOUT_MS, shouldWatchIdle, startIdleWatch } from './idle';
+
+describe('shouldWatchIdle', () => {
+  it('does not treat checking as leaving the idle window', () => {
+    expect(shouldWatchIdle('cabinet')).toBe(true);
+    expect(shouldWatchIdle('checking')).toBe(true);
+  });
+});
 
 describe('idle logout', () => {
   beforeEach(() => {

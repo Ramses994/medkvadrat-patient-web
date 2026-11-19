@@ -201,29 +201,29 @@ test('Ю3-1: displayUntil + delayed refresh 401 → checking then login', async 
   await page.getByRole('button', { name: 'Профиль' }).click();
   await expect(page.getByText('Иванов Иван Иванович')).toBeVisible();
 
+  // Real stub delay (Node timers), not a held Promise; always reset after the test.
   await stubRefreshDelay(page, 1_500);
-  let releaseRefresh!: () => void;
-  const held = new Promise<void>((r) => {
-    releaseRefresh = r;
-  });
-  await page.route('**/api/auth/refresh', async (route) => {
-    await held;
-    await route.fulfill({
-      status: 401,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        success: false,
-        error_details: { code: 'UNAUTHORIZED', message: 'Unauthorized' },
-      }),
+  try {
+    await page.route('**/api/auth/refresh', async (route) => {
+      // Hit stub so refreshDelayMs applies (real wall time), then force 401.
+      await route.fetch();
+      await route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: false,
+          error_details: { code: 'UNAUTHORIZED', message: 'Unauthorized' },
+        }),
+      });
     });
-  });
 
-  await page.clock.fastForward(6 * 60 * 1000);
-  await expect(page.getByRole('heading', { name: 'Проверяем сессию…' })).toBeVisible();
-  await expect(page.getByText('Иванов Иван Иванович')).toHaveCount(0);
-
-  releaseRefresh();
-  await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible({ timeout: 10_000 });
+    await page.clock.fastForward(6 * 60 * 1000);
+    await expect(page.getByRole('heading', { name: 'Проверяем сессию…' })).toBeVisible();
+    await expect(page.getByText('Иванов Иван Иванович')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Вход' })).toBeVisible({ timeout: 10_000 });
+  } finally {
+    await stubRefreshDelay(page, 0);
+  }
 });
 
 test('Ю3-2: displayUntil after hidden→visible → checking then login', async ({ page }) => {
@@ -291,7 +291,10 @@ test('Ю3-3: 30s TTL, successful refresh — at most two refresh in 60s', async 
   await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
   refreshHits = 0;
 
-  await page.clock.fastForward(60_000);
+  // Two 30s steps (not one 60s jump) so preempt/display timers can fire between.
+  await page.clock.fastForward(30_000);
+  await page.waitForTimeout(300);
+  await page.clock.fastForward(30_000);
   await page.waitForTimeout(500);
   expect(refreshHits).toBeLessThanOrEqual(2);
   await expect(page.getByRole('heading', { name: 'Мои записи' })).toBeVisible();
@@ -303,8 +306,14 @@ test('Ю3-4: delayed logout, close tab1 → tab2 login after revoke', async ({ b
   const held = new Promise<void>((r) => {
     releaseLogout = r;
   });
+  let logoutSession = '';
 
   await page1.route('**/api/auth/logout', async (route) => {
+    try {
+      logoutSession = String(JSON.parse(route.request().postData() || '{}').session || '');
+    } catch {
+      logoutSession = '';
+    }
     await held;
     await route.continue();
   });
@@ -320,6 +329,15 @@ test('Ю3-4: delayed logout, close tab1 → tab2 login after revoke', async ({ b
   await expect(page1.getByRole('heading', { name: 'Вход' })).toBeVisible();
   releaseLogout();
   await page1.waitForTimeout(400);
+
+  // Server-side session revoke in stub API (not only the login screen).
+  expect(logoutSession).toMatch(/^sid-/);
+  const live = await page1.evaluate(async (sid) => {
+    const res = await fetch(`/api/stub/sid-live?sid=${encodeURIComponent(sid)}`);
+    return res.json();
+  }, logoutSession);
+  expect(live?.data?.live).toBe(false);
+
   await page1.close();
 
   // Tab2 acquires lock and boots; cookie revoked → login.

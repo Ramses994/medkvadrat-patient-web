@@ -25,21 +25,22 @@ let refreshDelayMs = 0;
 const PROFILE_A = {
   patient_id: 900001,
   full_name: 'Иванов Иван Иванович',
-  phone: '+79000000000',
-  email: 'ivan@example.test',
+  // Masked as API А5 would return — web must not re-mask.
+  phone: '+7 *** ***-00-00',
+  email: 'i***@example.test',
   birth_date: '1990-05-15',
 };
 const PROFILE_B = {
   patient_id: 900002,
   full_name: 'Иванова Мария Ивановна',
-  phone: '+79000000001',
-  email: 'maria@example.test',
+  phone: '+7 *** ***-00-01',
+  email: 'm***@example.test',
   birth_date: '1992-08-20',
 };
 const APPTS_A = [
   {
     planning_id: 800001,
-    starts_at: '2099-06-26 19:30',
+    starts_at: '2026-10-13 16:40',
     duration_min: 30,
     state: 'scheduled',
     is_waitlist: false,
@@ -173,6 +174,11 @@ const server = http.createServer(async (req, res) => {
       return ok(res, { refreshDelayMs });
     }
 
+    if (method === 'GET' && path === '/api/stub/sid-live') {
+      const sid = String(url.searchParams.get('sid') || '');
+      return ok(res, { live: sid ? sidHasLive(sid) : false });
+    }
+
     if (method === 'POST' && path === '/api/auth/otp/request') {
       const body = await readBody(req);
       const phone = String(body.phone || '');
@@ -182,6 +188,7 @@ const server = http.createServer(async (req, res) => {
         request_id: id,
         ttl: 300,
         message: 'Если номер зарегистрирован в клинике, код отправлен на e-mail из карточки',
+        delivery: 'pilot',
       });
     }
 

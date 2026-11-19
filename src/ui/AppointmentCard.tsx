@@ -1,5 +1,6 @@
 import type { Appointment } from '../api/types';
 import { appointmentStateText, confirmationText } from '../api/states';
+import { formatAppointmentWhen } from './datetime';
 
 export function AppointmentCard({ item }: { item: Appointment }) {
   const state = appointmentStateText(item.state);
@@ -10,7 +11,7 @@ export function AppointmentCard({ item }: { item: Appointment }) {
 
   return (
     <article className="card">
-      <h3>{item.starts_at}</h3>
+      <h3>{formatAppointmentWhen(item.starts_at)}</h3>
       {item.doctor?.name ? <div>{item.doctor.name}</div> : null}
       {item.exam_name ? <div className="muted">{item.exam_name}</div> : null}
       {branch ? <div className="muted">{branch}</div> : null}

@@ -95,4 +95,16 @@ fi
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${WEB_PORT}/dashboard")
 test "$code" = "404"
 
+# В4: server_tokens off — no nginx version in headers or 404 body.
+hdrs=$(curl -sI "http://127.0.0.1:${WEB_PORT}/healthz")
+if echo "$hdrs" | grep -qiE 'Server:[[:space:]]*nginx/[0-9]'; then
+  echo "nginx version leaked in headers: $hdrs" >&2
+  exit 1
+fi
+body404=$(curl -s "http://127.0.0.1:${WEB_PORT}/__no_such_page_404__")
+if echo "$body404" | grep -qiE 'nginx/[0-9]'; then
+  echo "nginx version leaked in 404 body" >&2
+  exit 1
+fi
+
 echo "nginx-image-test OK"

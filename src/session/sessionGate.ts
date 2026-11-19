@@ -127,6 +127,11 @@ export function clearLogoutFlag(): void {
   }
 }
 
+/** True when the page is a secure context (https / localhost). */
+export function isSecurePageContext(): boolean {
+  return typeof window !== 'undefined' && window.isSecureContext === true;
+}
+
 export function locksSupported(): boolean {
   return typeof navigator !== 'undefined' && !!navigator.locks?.request;
 }

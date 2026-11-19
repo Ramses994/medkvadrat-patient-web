@@ -3,6 +3,7 @@ import { ApiError, requestOtp, verifyOtp } from '../api/client';
 import type { OtpVerifyResult, PatientCandidate, TokenPair } from '../api/types';
 import { isStaleSessionError } from '../session/sessionGate';
 import { ErrorBox } from '../ui/ErrorBox';
+import { otpCodeHint } from '../ui/otpDelivery';
 import { formatPhoneMask, sanitizeCode, toApiPhone } from '../ui/phone';
 
 type Props = {
@@ -15,7 +16,7 @@ const RESEND_SEC = 60;
 export function LoginScreen({ onTokens, onCandidates }: Props) {
   const [phone, setPhone] = useState('+7');
   const [requestId, setRequestId] = useState<string | null>(null);
-  const [message, setMessage] = useState('');
+  const [delivery, setDelivery] = useState<string | undefined>(undefined);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<{ code?: string; status?: number } | null>(null);
@@ -38,7 +39,7 @@ export function LoginScreen({ onTokens, onCandidates }: Props) {
     try {
       const res = await requestOtp(apiPhone);
       setRequestId(res.request_id);
-      setMessage(res.message);
+      setDelivery(res.delivery);
       setCooldown(RESEND_SEC);
       setCode('');
     } catch (e) {
@@ -77,7 +78,7 @@ export function LoginScreen({ onTokens, onCandidates }: Props) {
   return (
     <section className="panel stack">
       <h1 className="heading-flush">Вход</h1>
-      <p className="muted">Введите номер телефона из карточки клиники. Код придёт на e-mail из карточки.</p>
+      <p className="muted">Введите номер телефона из карточки клиники.</p>
 
       <label>
         Телефон
@@ -101,7 +102,7 @@ export function LoginScreen({ onTokens, onCandidates }: Props) {
 
       {requestId ? (
         <>
-          <p className="hint">{message}</p>
+          <p className="hint">{otpCodeHint(delivery)}</p>
           <label>
             Код
             <input

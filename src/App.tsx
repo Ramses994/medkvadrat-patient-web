@@ -19,7 +19,7 @@ import { HistoryScreen } from './screens/HistoryScreen';
 import { LoginScreen } from './screens/LoginScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
 import { SelectProfileScreen } from './screens/SelectProfileScreen';
-import { startIdleWatch } from './session/idle';
+import { shouldWatchIdle, startIdleWatch } from './session/idle';
 import {
   advanceSession,
   clearLogoutFlag,
@@ -28,6 +28,7 @@ import {
   hasLogoutFlag,
   holdCabinetLock,
   isCurrentGeneration,
+  isSecurePageContext,
   isSessionChangedError,
   locksSupported,
   setLogoutFlag,
@@ -39,6 +40,7 @@ import { clearAccessToken } from './session/tokenStore';
 type Tab = 'appointments' | 'history' | 'profile';
 type Phase =
   | { kind: 'boot' }
+  | { kind: 'insecure' }
   | { kind: 'unsupported' }
   | { kind: 'waiting' }
   | { kind: 'checking' }
@@ -160,6 +162,11 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Insecure context first: no lock, no API.
+      if (!isSecurePageContext()) {
+        if (!cancelled) setPhase({ kind: 'insecure' });
+        return;
+      }
       if (!locksSupported()) {
         if (!cancelled) setPhase({ kind: 'unsupported' });
         return;
@@ -182,12 +189,13 @@ export function App() {
     };
   }, [bootCabinet, releaseLock]);
 
+  const idleActive = ownsLock && shouldWatchIdle(phase.kind);
   useEffect(() => {
-    if (!ownsLock || phase.kind !== 'cabinet') return;
+    if (!idleActive) return;
     return startIdleWatch(() => {
       void doLogout();
     });
-  }, [ownsLock, phase.kind, doLogout]);
+  }, [idleActive, doLogout]);
 
   useEffect(() => {
     if (!ownsLock) return;
@@ -209,6 +217,21 @@ export function App() {
 
   // Login / cabinet / select only while this tab owns the lock.
   if (!ownsLock) {
+    if (phase.kind === 'insecure') {
+      return (
+        <div className="app-shell">
+          <header className="topbar">
+            <div className="brand">МедКвадрат</div>
+          </header>
+          <section className="panel stack">
+            <h1 className="heading-flush">Нужен защищённый адрес</h1>
+            <p className="muted">
+              Личный кабинет открывается только по защищённому адресу (https). Обратитесь в клинику.
+            </p>
+          </section>
+        </div>
+      );
+    }
     if (phase.kind === 'unsupported') {
       return (
         <div className="app-shell">
@@ -315,14 +338,6 @@ export function App() {
       ) : null}
       {showPatientData && phase.tab === 'history' ? <HistoryScreen /> : null}
       {showPatientData && phase.tab === 'profile' ? <ProfileScreen /> : null}
-
-      {showPatientData ? (
-        <div className="footer-logout">
-          <button type="button" className="btn ghost" onClick={() => void doLogout()}>
-            Выйти
-          </button>
-        </div>
-      ) : null}
     </div>
   );
 }
