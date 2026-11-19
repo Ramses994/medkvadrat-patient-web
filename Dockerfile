@@ -19,8 +19,10 @@ COPY nginx/nginx.conf.template /etc/nginx/templates-src/http.conf.template
 COPY nginx/nginx.conf.https.template /etc/nginx/templates-src/https.conf.template
 # Default HTTP template until 18-patient-web.sh selects (also covers empty templates/).
 COPY nginx/nginx.conf.template /etc/nginx/templates/default.conf.template
-COPY docker-entrypoint.sh /docker-entrypoint.d/18-patient-web.sh
-RUN chmod +x /docker-entrypoint.d/18-patient-web.sh
+# *.envsh is sourced by the nginx entrypoint so exit 1 actually aborts start
+# (plain *.sh runs inside find|while and a failing exit is ignored).
+COPY docker-entrypoint.sh /docker-entrypoint.d/18-patient-web.envsh
+RUN chmod +x /docker-entrypoint.d/18-patient-web.envsh
 COPY --from=build /app/dist /usr/share/nginx/html
 # Placeholder overwritten at container start from CLINIC_PHONE.
 RUN printf '%s\n' '{"clinic_phone":""}' > /usr/share/nginx/html/runtime-config.json \

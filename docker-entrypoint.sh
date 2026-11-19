@@ -1,7 +1,7 @@
-#!/bin/sh
+# Sourced by the nginx image as *.envsh (not executed in a pipeline subshell).
+# On failure: exit 1 stops the container. On success: fall through — do not exit.
 # Selects nginx template by TLS file presence; writes clinic phone for the SPA.
-# Runs before 20-envsubst-on-templates.sh (name 18-*). Never logs the TLS key.
-set -eu
+# Never logs the TLS key contents.
 
 TLS_CRT=/etc/nginx/tls/tls.crt
 TLS_KEY=/etc/nginx/tls/tls.key

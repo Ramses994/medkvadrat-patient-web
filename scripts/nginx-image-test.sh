@@ -126,17 +126,22 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 rm -f "$TLS_BAD/discard.key"
 chmod 644 "$TLS_BAD/tls.crt"
 
-set +e
-docker run --name "$WEB_NAME" --network "$NET" \
+docker run -d --name "$WEB_NAME" --network "$NET" \
   -v "$TLS_BAD:/etc/nginx/tls:ro" \
   -e API_UPSTREAM="http://${STUB_NAME}:8080" \
   -e PUBLIC_ORIGIN="https://lk.example.test" \
-  "$IMAGE" >/tmp/patient-web-tls-missing-key.log 2>&1
-missing_key_rc=$?
-set -e
+  "$IMAGE" >/dev/null
+missing_key_ok=0
+for _ in $(seq 1 20); do
+  running=$(docker inspect -f '{{.State.Running}}' "$WEB_NAME" 2>/dev/null || echo false)
+  if [ "$running" != "true" ]; then missing_key_ok=1; break; fi
+  sleep 0.5
+done
+docker logs "$WEB_NAME" > /tmp/patient-web-tls-missing-key.log 2>&1 || true
 docker rm -f "$WEB_NAME" >/dev/null 2>&1 || true
-if [ "$missing_key_rc" -eq 0 ]; then
-  echo "expected container to fail when cert exists without key" >&2
+if [ "$missing_key_ok" -ne 1 ]; then
+  echo "expected container to fail when cert exists without key (still running)" >&2
+  cat /tmp/patient-web-tls-missing-key.log >&2
   exit 1
 fi
 if ! grep -qiE 'key missing|TLS key' /tmp/patient-web-tls-missing-key.log; then
@@ -204,17 +209,22 @@ docker rm -f "$WEB_NAME" >/dev/null
 # --- Key owned by root:root mode 600: clear permission failure ---
 chown root:root "$TLS_DIR/tls.key"
 chmod 600 "$TLS_DIR/tls.key"
-set +e
-docker run --name "$WEB_NAME" --network "$NET" \
+docker run -d --name "$WEB_NAME" --network "$NET" \
   -v "$TLS_DIR:/etc/nginx/tls:ro" \
   -e API_UPSTREAM="http://${STUB_NAME}:8080" \
   -e PUBLIC_ORIGIN="https://lk.example.test" \
-  "$IMAGE" >/tmp/patient-web-tls-perms.log 2>&1
-perms_rc=$?
-set -e
+  "$IMAGE" >/dev/null
+perms_ok=0
+for _ in $(seq 1 20); do
+  running=$(docker inspect -f '{{.State.Running}}' "$WEB_NAME" 2>/dev/null || echo false)
+  if [ "$running" != "true" ]; then perms_ok=1; break; fi
+  sleep 0.5
+done
+docker logs "$WEB_NAME" > /tmp/patient-web-tls-perms.log 2>&1 || true
 docker rm -f "$WEB_NAME" >/dev/null 2>&1 || true
-if [ "$perms_rc" -eq 0 ]; then
-  echo "expected container to fail when TLS key is root:root mode 600" >&2
+if [ "$perms_ok" -ne 1 ]; then
+  echo "expected container to fail when TLS key is root:root mode 600 (still running)" >&2
+  cat /tmp/patient-web-tls-perms.log >&2
   exit 1
 fi
 if ! grep -qiE 'not readable|permission|uid 101' /tmp/patient-web-tls-perms.log; then
