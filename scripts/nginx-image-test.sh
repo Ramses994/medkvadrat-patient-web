@@ -43,6 +43,18 @@ wait_healthz() {
   return 1
 }
 
+# Host runner is often non-root (cannot chown to 101); use a root container.
+tls_own() {
+  # usage: tls_own <dir> <owner> <mode> <file> [<file>...]
+  local dir=$1 owner=$2 mode=$3
+  shift 3
+  local args="" f
+  for f in "$@"; do
+    args="$args chown $owner /tls/$f && chmod $mode /tls/$f;"
+  done
+  docker run --rm -v "$dir:/tls" alpine:3.20 sh -c "$args"
+}
+
 docker network create "$NET" >/dev/null
 
 docker run -d --name "$STUB_NAME" --network "$NET" -p "${STUB_PORT}:8080" \
@@ -160,10 +172,9 @@ chmod 755 "$TLS_DIR"
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout "$TLS_DIR/tls.key" -out "$TLS_DIR/tls.crt" \
   -days 1 -subj "/CN=lk.example.test" >/dev/null 2>&1
-# nginx uid/gid 101 in nginxinc/nginx-unprivileged
-chown 101:101 "$TLS_DIR/tls.crt" "$TLS_DIR/tls.key"
-chmod 644 "$TLS_DIR/tls.crt"
-chmod 600 "$TLS_DIR/tls.key"
+# nginx uid/gid 101 in nginxinc/nginx-unprivileged (via root helper; host may be non-root)
+tls_own "$TLS_DIR" 101:101 644 tls.crt
+tls_own "$TLS_DIR" 101:101 600 tls.key
 
 docker run -d --name "$WEB_NAME" --network "$NET" \
   -p "${WEB_PORT}:8080" -p "${WEB_TLS_PORT}:8443" \
@@ -210,8 +221,7 @@ fi
 docker rm -f "$WEB_NAME" >/dev/null
 
 # --- Key owned by root:root mode 600: clear permission failure ---
-chown root:root "$TLS_DIR/tls.key"
-chmod 600 "$TLS_DIR/tls.key"
+tls_own "$TLS_DIR" root:root 600 tls.key
 docker run -d --name "$WEB_NAME" --network "$NET" \
   -v "$TLS_DIR:/etc/nginx/tls:ro" \
   -e API_UPSTREAM="http://${STUB_NAME}:8080" \
@@ -235,8 +245,5 @@ if ! grep -qiE 'not readable|permission|uid 101' /tmp/patient-web-tls-perms.log;
   cat /tmp/patient-web-tls-perms.log >&2
   exit 1
 fi
-
-# Restore readable key ownership for cleanup clarity
-chown 101:101 "$TLS_DIR/tls.key" 2>/dev/null || true
 
 echo "nginx-image-test OK"
