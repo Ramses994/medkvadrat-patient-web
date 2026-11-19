@@ -120,6 +120,8 @@ docker rm -f "$WEB_NAME" >/dev/null
 
 # --- Cert without key: container must fail to start ---
 TLS_BAD=$(mktemp -d)
+# Directory must be traversable by nginx (uid 101); mktemp defaults to 700.
+chmod 755 "$TLS_BAD"
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout "$TLS_BAD/discard.key" -out "$TLS_BAD/tls.crt" \
   -days 1 -subj "/CN=lk.example.test" >/dev/null 2>&1
@@ -154,6 +156,7 @@ TLS_BAD=
 
 # --- HTTPS with self-signed cert for lk.example.test ---
 TLS_DIR=$(mktemp -d)
+chmod 755 "$TLS_DIR"
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout "$TLS_DIR/tls.key" -out "$TLS_DIR/tls.crt" \
   -days 1 -subj "/CN=lk.example.test" >/dev/null 2>&1
